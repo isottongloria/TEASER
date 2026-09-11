@@ -16,5 +16,6 @@ gdown
 fvcore
 iopath
 pytorch_lightning==2.2.1
+imageio-ffmpeg # required by imageio.mimsave(...) in main/demo_video.py and main/demo_video_swap_token.py to write .mp4 files; missing from the original list
 
 #smirk_token: without source face mask, we hope that the token can cover all the identity information we need.

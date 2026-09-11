@@ -6,3 +6,9 @@ assets/*
 !assets/demo/images/*
 results/*
 logs/*
+pretrained_models/
+.conda_envs/
+.conda_pkgs_cache/
+.pip_cache/
+.cache/
+datasets/preprocess_scripts/landmark.onnx
