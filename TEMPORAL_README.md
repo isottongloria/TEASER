@@ -112,6 +112,31 @@ Measured by running the real model (TEASER env, `pretrained_models/TEASER.pt`;
   weight; without it the weight is 1).
 - Never train on PHOENIX test, Multiface or the reel clips.
 
+### Data access (found 2026-10-02) -- blocks training
+
+| corpus / split | frames readable by this account | per-clip npz |
+|---|---|---|
+| PHOENIX train (`phoenix/phoenix/train`, 7101 clips) | **no**: `frames/` link into `/leonardo_scratch/fast/IscrC_SIGMA/signdata/...` | `wilor/teaser/mediapipe.npz` mode 600 (owner only); `fit_gvhmr*.npz` readable |
+| PHOENIX test | yes (`RGB2SMPLX/phoenix_data`, 642 clips; the local tarball holds only test) | yes |
+| CSL-Daily train | **no**: `/leonardo_work/IscrC_SIGMA/rgb2smplx/csl*` permission denied | -- |
+| CSL-Daily test (`csl/test`, 123 clips) | yes | yes |
+
+Pixel3DMM and TEASER both need the frames, so the train subsets cannot be
+built until read access to those frames exists (or PHOENIX-2014-T is fetched
+in full). Clip selection does not need frames: it runs on the readable fits.
+
+- Clip selection: `tools_temporal/select_train_clips.py` (RGB2SMPLX env) scores
+  clips with RGB2SMPLX's own jitter-fix occlusion measure on the fitted
+  SMPL-X. Fully clean clips are rare (PHOENIX train sample: 14 of 20 clips had
+  an occluded frame, the clean ones all short), so "clean" = at most 5 %
+  occluded frames, "occluded" = at least 10 %, clips of at least 32 frames.
+- Pixel3DMM throughput on PHOENIX: ~12 clips per GPU-hour (2 workers on one
+  A100, `experiments/occlusion_protocols_smplx/pixel3dmm/run_pixel3dmm_phoenix.sbatch`
+  in RGB2SMPLX, reused unchanged): 300 clips ~ 25 GPU-h.
+- Dumping the tracker loss (decision E) would mean changing RGB2SMPLX's
+  `rgb2smplx/stages/pixel3dmm.py`; not done (main pipeline stays untouched),
+  so the Pixel3DMM confidence weight is 1.
+
 ### Why synthetic occlusion is the training signal and real occlusion still matters
 
 On a real occluded frame there is no target: Pixel3DMM is unreliable there
@@ -321,18 +346,28 @@ export PYTHONPATH=.
 # unit tests (CPU part)
 $TPY -m pytest tests/temporal -q
 
-# 4.1 feature cache for one RGB2SMPLX work directory
+# 4.1 feature cache for one RGB2SMPLX work directory (batch 1 = identical to teaser.npz)
 $TPY tools_temporal/extract_features.py <work_dir> <out.npz> \
     --checkpoint pretrained_models/TEASER.pt --temporal_feats expr
+
+# step 1 checks on a GPU (debug queue): unit tests + cache == RGB2SMPLX stage on a real clip
+sbatch tools_temporal/sbatch/test_step1.sbatch          # CLIP=<work_dir> to change clip
+
+# clip lists for the Pixel3DMM train subsets (RGB2SMPLX env, reads the fits only)
+sbatch tools_temporal/sbatch/select_phoenix_train.sbatch
 ```
+
+Verified 2026-10-02 (job 59220919, A100): unit tests OK on CPU and CUDA; on
+`csl/test/S005996_P0006_T00` (105 frames) every `teaser.npz` key of the cache
+is identical to `rgb2smplx.stages.teaser --batch-size 1`.
 
 ---
 
 ## 9. Progress
 
 - [x] Phase 0: exploration, plan, decisions (this file)
-- [ ] 4.1 split encoder + identity test + feature cache
-- [ ] clip lists + Pixel3DMM sbatch for the train subsets (user launches)
+- [x] 4.1 split encoder + identity test + feature cache (verified, see 8)
+- [ ] clip lists + Pixel3DMM sbatch for the train subsets (user launches) -- **blocked on frame access** (3)
 - [ ] 4.2 pseudo-GT, 4.3 `c_t`
 - [ ] 4.4 adapter, 4.5 losses, 4.7 training
 - [ ] 4.6 synthetic occlusion
