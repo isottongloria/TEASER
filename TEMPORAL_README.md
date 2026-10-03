@@ -28,11 +28,15 @@ does not depend on Track 2 in any way.
 
 **What Track 1 can and cannot do.** The gain comes from two things the model
 learns: to use the visible frames before and after the hand, and that the
-features of a covered face are unreliable. Expect the largest improvement on
-*partial* occlusions and on the frames *next to* an occlusion. Under a long,
-total occlusion the mouthing is simply not in the video: no model recovers it,
-the best is a plausible continuation from context. The success criteria (7)
-are there to tell a real temporal model from aggressive smoothing.
+features of a covered face are unreliable. Real hand-face occlusions are
+**short**: 4.3 frames on average, median 3, 95 % within 12 frames (table in
+4.3). So the job is mostly bridging a few frames from good context on both
+sides, and cleaning up the frames next to the occlusion, which TEASER already
+gets wrong; partial occlusions are where the image still helps most. The rare
+long total occlusions (1-2 % over 15 frames) are where no model recovers the
+mouthing: the best is a plausible continuation. Because episodes are short,
+the interpolation baseline (T2) is a strong one to beat, and the success
+criteria (7) are what tell a real temporal model from aggressive smoothing.
 
 **Status:** Track 1 plan agreed 2026-10-03. Step 1 (split encoder + feature
 cache) done and verified; see 12.
@@ -154,7 +158,7 @@ IscrC_SIGMA owners; or the full public releases (PHOENIX-2014-T, CSL-Daily,
 How2Sign), downloaded only with explicit approval. Training on PHOENIX/CSL
 **test** clips is not an option: it contaminates the official test splits.
 
-### 4.2 Splits
+### 4.2 Splits (see also 4.3)
 
 - **Signer-disjoint.** Test signers never appear in training, in any corpus.
   Per corpus 2 signers are held out for test and 1 for validation, chosen so
@@ -164,6 +168,26 @@ How2Sign), downloaded only with explicit approval. Training on PHOENIX/CSL
 - Our existing evaluation sets (the 100 PHOENIX test clips of
   `phoenix_facesmooth/test`, the CSL test reel) are kept as an extra
   *real-occlusion* check; they are never trained on.
+
+### 4.3 How long real occlusions are
+
+Measured in RGB2SMPLX (`experiments/occlusion_protocols_smplx/results/segment_durations.json`):
+episodes where the hands cover more than 20 % of the mouth/nose/chin region
+(IoA > 0.2), at 25 fps.
+
+| | episodes | mean | median | p75 | p90 | p95 | p99 | max |
+|---|---|---|---|---|---|---|---|---|
+| CSL test | 341 | 3.7 | 3 | 5 | 8 | 10 | 17 | 23 |
+| PHOENIX test (100 clips) | 199 | 5.4 | 4 | 6 | 10 | 14 | 21 | 53 |
+| combined | 540 | **4.3** | **3** | 5 | 9 | 12 | 18 | 53 |
+
+Durations in frames. 40 % of episodes last 1-2 frames, 2.4 % more than 15,
+0.4 % more than 25. This histogram is the starting distribution for the
+synthetic occlusions until 5.2 recomputes it on the training signers.
+Consequences: a 16-frame window always has context on both sides of a
+typical episode (p99 = 18), so the window sweep is 8 / 16, with 32 only as a
+check; synthetic durations follow this distribution instead of "anything up
+to the whole window".
 
 ---
 
@@ -231,14 +255,22 @@ TemporalAdapter(feat_dim, arch='transformer', d_model=256, n_layers=2, window=16
 
 ### 5.4 Synthetic occlusion -- `src/temporal/occlusion_aug.py` (`--synthetic_occlusion`)
 
-- RGBA hand patches (a folder of PNGs, user-provided), pasted on the **full
-  frame before detection and cropping**, so the face detector and the crop
-  react as they do to a real hand.
+- RGBA hand patches pasted on the **full frame before detection and
+  cropping**, so the face detector and the crop react as they do to a real
+  hand.
+- The patches are cut from our own sign-language frames
+  (`tools_temporal/build_hand_bank.py`): frames where a hand is clearly
+  visible and away from the face, hand keypoints (WiLoR or MediaPipe Hands)
+  -> box, alpha by segmentation seeded with the keypoint hull, rejected if the
+  mask is not hand-shaped. Same lighting, resolution, blur and sleeves as the
+  real occluder. A hand's "identity" is the signer it comes from, so the
+  train / test split of the bank follows the signer split (4.2): test hands
+  come from test signers. An external hand image set is only a fallback.
 - Random scale, rotation, Lab mean/std colour transfer towards the face skin.
-- Trajectories: smooth within the window (enter, stay, leave), over mouth or
-  eyes; position, duration and coverage (partial / total) sampled from the
-  real statistics of 5.2, including long and partial occlusions, not only
-  short total ones.
+- Trajectories: the hand enters, stays, leaves, over mouth or eyes; position,
+  duration and coverage (partial / total) sampled from the real statistics
+  (4.3 / 5.2): mostly 1-5 frames, a tail up to ~20, partial as well as total
+  coverage.
 - Returns the synthetic `c_t`, computed from the pasted alpha mask with the
   same region polygons as `c_t_real`.
 - **Hold-out for the test set** (7.2): the hand PNGs are split once into
@@ -268,10 +300,12 @@ All per-frame target terms carry the real-occlusion weight of 3.
 Per training window of T frames:
 1. With probability `--occ_aug_p` (default 0.5) the window gets synthetic
    occlusion; otherwise it stays clean.
-2. In an occluded window the hand covers a contiguous part of it -- from a few
-   frames to almost all of it, duration sampled from the real statistics --
-   with total and partial coverage; the frames before and after stay visible,
-   and those are the frames the model has to learn to use.
+2. In an occluded window the hand covers a contiguous run of frames whose
+   length is sampled from the real distribution (4.3: median 3, mean ~4, tail
+   to ~20), placed so that most episodes have visible frames on both sides,
+   with total and partial coverage. The visible frames before and after are
+   the ones the model has to learn to use. A window can hold more than one
+   episode, at the real episode rate.
 3. Independently, frame masking (`[MASK]` in place of some features) as a
    third, simpler kind of disturbance.
 4. In every window, clean or not, per-frame target losses are attenuated by
@@ -345,8 +379,11 @@ Otherwise it measures how well the model memorised the training hands:
 - **different hands**: a held-out group of hand PNGs never used in training,
   and test trajectories generated differently (replayed real hand motion);
 - **realistic durations and positions**: length, frequency and coverage of
-  the synthetic occlusions sampled from the real statistics (5.2) of PHOENIX
-  and CSL, including partial and long occlusions, not only short total ones.
+  the synthetic occlusions sampled from the real statistics (4.3, 5.2) of
+  PHOENIX and CSL -- short episodes dominate (median 3 frames) -- with the
+  tail (10-20 frames) and partial coverage represented, and results reported
+  per duration bucket (1-2, 3-5, 6-10, >10 frames) so a win on the common
+  short case cannot hide a loss on the long one.
 
 The test set is generated once with a fixed seed and stored
 (`tools_temporal/build_occlusion_testset.py`), so every method is scored on the
@@ -371,8 +408,7 @@ Sweeps (on T7 unless stated):
 - `occ_aug_p` 0.3 / 0.5 / 0.7 -- read together the occluded-frame error and
   the clean-frame fidelity; higher p should help the first and cost a little
   on the second, and the test set decides
-- window 8 / 16 / 32 frames (also the fps check: if 32 wins only on CSL at 30
-  fps, the window moves to seconds)
+- window 8 / 16 frames (32 only as a check; real episodes are short, 4.3)
 - architecture transformer / tcn / gru; causal vs not
 - features `expr` vs `expr+pose`; `--self_target vertices | params`;
   `--self_target_smoothed`
@@ -395,6 +431,8 @@ parameters, negligible next to the encoders).
 | 6 | `--temporal_head` | `frozen` / `full`; no LoRA |
 | 7 | `replace` fusion | `alpha * f + T(f)`, `alpha` starts at 1 |
 | 8 | window / inference | in frames, default 16; overlap-add (Hann, stride 4) |
+| 10 | synthetic occlusion durations | from the real distribution: mean ~4 frames, median 3, tail to ~20 |
+| 11 | hand patches | cut from our own frames, split by signer |
 | 9 | RGB2SMPLX | untouched until a winner; then `teaser_temporal.npz` |
 
 ---
