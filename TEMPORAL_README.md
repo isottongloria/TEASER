@@ -200,8 +200,8 @@ of `rgb2smplx/stages/teaser.py`; one `.npz` per clip:
 
 | key | shape | notes |
 |---|---|---|
-| `feat_expr` | (T, 960) fp16 | always |
-| `feat_pose` | (T, 576) fp16 | `--temporal_feats expr+pose` |
+| `feat_expr` | (T, 960) fp32 | always (fp32 so the heads reproduce TEASER exactly) |
+| `feat_pose` | (T, 576) fp32 | `--temporal_feats expr+pose` |
 | `expression`, `jaw_pose`, `eyelid`, `pose_params`, `cam`, `shape_params` | as `teaser.npz` | TEASER's outputs = the teacher |
 | `tform` | (T, 3, 3) | frame px -> 224 crop px |
 | `landmarks` | (T, 478, 2) | frame px, interpolated where not detected |

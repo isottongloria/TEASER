@@ -47,14 +47,19 @@ def _clip_fps(work_dir):
 
 def extract_clip(work_dir, encoder, device, feature_set="expr", save_spatial=False,
                  face_detection_mode="pose_roi", crop_scale=1.4, roi_size=512,
-                 image_size=224, batch_size=1, frame_cache_mb=3072, progress=True):
-    """Returns the dict of arrays written to the cache (see TEMPORAL_README.md 4.1)."""
+                 image_size=224, batch_size=1, frame_cache_mb=3072, progress=True, frames=None):
+    """Returns the dict of arrays written to the cache (see TEMPORAL_README.md 5.1).
+
+    ``frames``: an indexable frame source to use instead of ``<work_dir>/frames``
+    (e.g. an ``occlusion_aug.Occluder`` that pastes synthetic hands on them).
+    """
     from tqdm import tqdm
     from src.temporal import split_encoder as se
     from src.temporal import video_crops as vc
 
     names = se.FEATURE_SETS[feature_set]
-    frames = vc.Frames(vc.list_frames(Path(work_dir) / "frames"), int(frame_cache_mb) << 20)
+    if frames is None:
+        frames = vc.Frames(vc.list_frames(Path(work_dir) / "frames"), int(frame_cache_mb) << 20)
     n = len(frames)
 
     vc.reset_pose_tracker()
@@ -77,7 +82,8 @@ def extract_clip(work_dir, encoder, device, feature_set="expr", save_spatial=Fal
         "tform": np.full((n, 3, 3), np.nan, np.float32),
     }
     for name in names:
-        out["feat_" + name] = np.zeros((n, se.FEATURE_DIMS[name]), np.float16)
+        # fp32: TEASER's heads on the cached feature must give TEASER's output exactly.
+        out["feat_" + name] = np.zeros((n, se.FEATURE_DIMS[name]), np.float32)
         if save_spatial:
             out[f"feat_{name}_map"] = np.zeros((n, se.FEATURE_DIMS[name], 7, 7), np.float16)
     # Pose and shape features are always computed (the heads need them for
@@ -101,7 +107,7 @@ def extract_clip(work_dir, encoder, device, feature_set="expr", save_spatial=Fal
             out["cam"][i] = heads["cam"][pos].cpu().numpy()
             out["shape_params"][i] = heads["shape_params"][pos].cpu().numpy()
             for name in names:
-                out["feat_" + name][i] = feats[name][pos].cpu().numpy().astype(np.float16)
+                out["feat_" + name][i] = feats[name][pos].cpu().numpy()
                 if save_spatial:
                     out[f"feat_{name}_map"][i] = feats[name + "_map"][pos].cpu().numpy().astype(np.float16)
         pending.clear()

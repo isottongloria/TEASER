@@ -1,0 +1,2 @@
+# T5: T4 + gated with c_t
+model: {fusion: gated, use_cond: true}

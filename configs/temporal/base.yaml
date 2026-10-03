@@ -1,0 +1,57 @@
+# Temporal TEASER, Track 1 (TEMPORAL_README.md). Every run = this file + a run
+# config (configs/temporal/T*.yaml) + command-line overrides (key=value).
+temporal:
+  enabled: true           # the YAML twin of --temporalize_teaser
+seed: 0
+device: cuda
+out_dir: ???
+checkpoint: pretrained_models/TEASER.pt   # TEASER weights (frozen encoder and heads)
+
+data:
+  cache_dir: ???          # clean feature caches <clip>.npz
+  occ_dir: null           # real occlusion <clip>.occ.npz
+  variant_dir: null       # synthetic-occlusion variants <clip>.v<k>.npz
+  train_list: ???
+  val_list: ???
+  feature_set: expr       # expr | expr+pose
+  teacher_smoothing: null # null | sg9  (--self_target_smoothed)
+
+model:
+  kind: adapter           # adapter | smoothnet (T3)
+  arch: transformer       # transformer | tcn | gru
+  d_model: 256
+  n_layers: 2
+  n_heads: 4
+  kernel_size: 3
+  dropout: 0.1
+  causal: false
+  fusion: residual        # residual | gated | replace
+  use_cond: false         # give the adapter c_t
+  mask_token: false
+  frame_mask_p: 0.0
+  head: frozen            # frozen | full
+  hidden: 128             # smoothnet only
+  n_blocks: 3             # smoothnet only
+
+loss:
+  self_target: vertices   # vertices | params
+  w_self: 1.0
+  w_occ: 1.0
+  w_accel: 1.0
+  w_region: {mouth: 1.0, eyes: 1.0, rest: 0.5}
+  hard_thresh: 0.5        # real occlusion above this: weight 0
+  near_k: 2               # L_occ also on +-k frames around a pasted hand
+
+train:
+  window: 16
+  batch_size: 64
+  steps: 3000
+  lr: 3.0e-4
+  weight_decay: 0.01
+  occ_aug_p: 0.0
+  occ_curriculum_steps: 0 # >0: occ_aug_p ramps from 0 over these steps
+  samples_per_epoch: 6400
+  num_workers: 4
+  log_every: 50
+  val_every: 500
+  infer_stride: 4

@@ -1,0 +1,3 @@
+# T7: T6 + synthetic occlusion with L_occ
+model: {fusion: gated, use_cond: true, mask_token: true, frame_mask_p: 0.15}
+train: {occ_aug_p: 0.5}

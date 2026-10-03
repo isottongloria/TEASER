@@ -1,0 +1,2 @@
+# T6: T5 + mask token and frame masking
+model: {fusion: gated, use_cond: true, mask_token: true, frame_mask_p: 0.15}

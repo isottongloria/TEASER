@@ -47,8 +47,15 @@ if __name__ == '__main__':
     parser.add_argument('--out_path', type=str, default='', help='Path to save the output (will be created if not exists)')
     parser.add_argument('--use_teaser_generator', action='store_true', help='Use TEASER neural image to image translator to reconstruct the image')
     parser.add_argument('--render_orig', action='store_true', help='Present the result w.r.t. the original image/video size')
+    parser.add_argument('--temporalize_teaser', action='store_true', help='Temporal TEASER (TEMPORAL_README.md); default off')
+    parser.add_argument('--temporal_ckpt', type=str, default='', help='Temporal model checkpoint (with --temporalize_teaser)')
 
     args = parser.parse_args()
+
+    if args.temporalize_teaser:
+        from src.temporal.demo import run_temporal_demo
+        run_temporal_demo(args, crop_face)
+        raise SystemExit(0)
 
     input_image_size = 224
     

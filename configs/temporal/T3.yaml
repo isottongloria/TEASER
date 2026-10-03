@@ -1,0 +1,3 @@
+# T3: SmoothNet on the 55 parameters, same self-supervised recipe as T7
+model: {kind: smoothnet}
+train: {occ_aug_p: 0.5}

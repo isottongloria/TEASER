@@ -1,0 +1,2 @@
+# T4: adapter, residual, L_self + L_accel
+model: {fusion: residual}
