@@ -73,7 +73,7 @@ def run_temporal_demo(args, crop_face):
         frames = []
         with torch.no_grad():
             for t in range(n):
-                base = {k: v[t:t + 1].to(device) for k, v in per_frame[t].items() if k != "token"}
+                base = {k: v.to(device) for k, v in per_frame[t].items() if k != "token"}
                 panels = [crops[t]]
                 for expression, jaw, eyelid in (
                         (base["expression_params"], base["jaw_params"], base["eyelid_params"]),

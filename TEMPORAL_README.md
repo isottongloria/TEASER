@@ -271,8 +271,17 @@ TemporalAdapter(feat_dim, arch='transformer', d_model=256, n_layers=2, window=16
   duration and coverage (partial / total) sampled from the real statistics
   (4.3 / 5.2): mostly 1-5 frames, a tail up to ~20, partial as well as total
   coverage.
-- Returns the synthetic `c_t`, computed from the pasted alpha mask with the
-  same region polygons as `c_t_real`.
+- Returns the synthetic `c_t`, computed from the pasted alpha mask over the
+  lips / eye contours of the clean clip's MediaPipe landmarks (scaled 1.3x /
+  1.5x to cover what FLAME's regions cover).
+- Pasting before detection means re-running MediaPipe and the crop, which is
+  too slow per training window. So the variants are made **offline**
+  (`tools_temporal/make_synthetic_variants.py`): K occluded variants per clip,
+  each a full re-extraction stored as a cache like the clean one plus
+  `c_syn`, `syn_mask`, the plan, and the clean cache it belongs to. Training
+  draws windows from them; the target stays TEASER on the clean clip.
+- `HandBank('procedural')` draws a skin-coloured palm-and-fingers shape. It is
+  for smoke tests only, never a training occluder.
 - **Hold-out for the test set** (7.2): the hand PNGs are split once into
   train / test identities (`--hands_split`), and the test set also uses a
   second trajectory generator that replays real hand motion (2D keypoint
@@ -311,9 +320,10 @@ Per training window of T frames:
 4. In every window, clean or not, per-frame target losses are attenuated by
    `(1 - c_t_real)` (3).
 
-Clean windows come from the feature cache; occluded windows need an online
-encoder forward on the pasted frames (encoders frozen, `no_grad`), which
-dominates the cost. `--occ_curriculum`: optional, a few epochs with p = 0,
+Clean windows come from the clean caches, occluded windows from the
+precomputed variants (5.4), placed so the episode has visible frames on
+both sides; neither needs the encoder at training time (one step ~35 ms on
+an A100 at batch 32). `--occ_curriculum`: optional, a few epochs with p = 0,
 then p ramps up -- only if training is unstable at the start.
 
 OmegaConf configs in `configs/temporal/*.yaml`; checkpoints hold the adapter
@@ -414,8 +424,9 @@ Sweeps (on T7 unless stated):
   `--self_target_smoothed`
 - optional: `--occ_curriculum`, `--temporal_head full`
 
-Defaults: `--temporal_feats expr`, `gated`, transformer 2 layers d=256 (~1.5 M
-parameters, negligible next to the encoders).
+Defaults: `--temporal_feats expr`, `gated`, transformer 2 layers d=256
+(~2.4-3.6 M parameters depending on gate / mask token; ~0.02 ms per frame,
+negligible next to the encoders).
 
 ---
 
@@ -467,7 +478,23 @@ queue (`boost_qos_dbg`, 30 min cap).
 
 ---
 
-## 12. Commands and progress
+## 12. Pipeline, commands and progress
+
+| step | script | env | output |
+|---|---|---|---|
+| clip dirs (PHOENIX we can read) | `tools_temporal/make_phoenix_clips.py` | TEASER | `<root>/<clip>/frames`, `video.json`, `signers.tsv` |
+| real occlusion | `tools_temporal/compute_real_occlusion.py` (from the TEASER-face SMPL-X fit) | RGB2SMPLX | `<clip>.occ.npz` |
+| occlusion statistics | `tools_temporal/occlusion_stats.py` | any | `occlusion_stats.json` |
+| clean features | `tools_temporal/extract_features.py` | TEASER | `<clip>.npz` |
+| synthetic variants | `tools_temporal/make_synthetic_variants.py` | TEASER | `<clip>.v<k>.npz` |
+| training | `tools_temporal/train_temporal.py configs/temporal/T*.yaml key=value ...` | TEASER | `config.yaml`, `log.jsonl`, `last.pt`, `best.pt` |
+| evaluation | `tools_temporal/eval_temporal.py --method NAME=teaser|sg9|sg9+interp|ckpt.pt` | TEASER | JSON + table + 7.1 checks |
+| inference | `tools_temporal/infer_clip.py` | TEASER | `teaser_temporal.npz` (keys of `teaser.npz`) |
+| demo | `main/demo_video.py ... --temporalize_teaser --temporal_ckpt ckpt.pt` | TEASER | crop / TEASER / temporal video |
+
+End-to-end smoke test: `tools_temporal/sbatch/phoenix_smoke.sbatch` (6
+PHOENIX test clips, one per signer, from 30 candidates outside the 100
+evaluation clips), then `tools_temporal/sbatch/smoke_pipeline.sbatch`.
 
 ```bash
 TPY=/leonardo_work/IscrC_SLPSCALE/TEASER/.conda_envs/teaser/bin/python
@@ -491,8 +518,25 @@ is identical to `rgb2smplx.stages.teaser --batch-size 1`.
 
 - [x] Phase 0 and plan (this file)
 - [x] 5.1 split encoder + identity test + feature cache
-- [ ] **training data access** (4.1) -- blocks training, not development
-- [ ] 5.2 `c_t_real` + occlusion statistics; signer splits (4.2)
-- [ ] 5.3 adapter, 5.5 losses
-- [ ] 5.4 synthetic occlusion + held-out test set (7.2)
-- [ ] 5.6 training, 5.8 baselines, 6 evaluation, 8 ablations
+- [x] 5.2 real occlusion (from the TEASER-face SMPL-X fits) + statistics
+- [x] 5.3 adapter, 5.5 losses, 5.8 baselines (SG9, Hermite splice, SmoothNet)
+- [x] 5.4 synthetic occlusion (procedural hands until the hand set exists)
+- [x] 5.6 training, 6 evaluation, 5.7 inference + demo flag
+- [x] whole pipeline run end to end on 6 PHOENIX test clips (2026-10-03, see below)
+- [ ] hand set (RGBA) with train / test identities; held-out test set (7.2)
+- [ ] training data (several corpora, signer splits, 4.1-4.2)
+- [ ] real trainings and 8 ablations
+
+Smoke test, 2026-10-03 (jobs 59256529, 59256974, 59257396, A100): 4 train /
+2 val clips (different signers), 2 procedural-hand variants per clip, 200
+steps. Every stage runs; unit tests pass; `teaser_temporal.npz` has the keys
+and shapes of `teaser.npz`; **demo with the flag OFF gives output identical
+to the production TEASER checkout** (130/130 frames); demo with the flag ON
+writes the 3-panel video. The numbers are not results (4 clips, 200 steps),
+only a sanity check that the losses do what they should: on the val
+variants T7 lowers the mouth error under synthetic occlusion from 14.8 mm
+(T0) to 6.2 mm (T2: 9.7) with 0.18 mm clean-frame drift from TEASER, while
+T4 (no synthetic occlusion) stays at TEASER (0.08 mm drift) and does not
+help under occlusion. Jerk is still far above SG9 at this length of
+training (`w_accel` untuned). Training ~35 ms/step, the adapter ~0.02 ms
+per frame at inference.
