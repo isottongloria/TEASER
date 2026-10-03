@@ -75,8 +75,21 @@ def flame_region_ids_in_smplx():
     return {"mouth": flame_to_smplx[regions["mouth"]], "eyes": flame_to_smplx[regions["eyes"]]}
 
 
+def fit_for_geometry(npz, geometry, width=50):
+    """RGB2SMPLX's geometry builds SMPL-X with 50 expression coefficients; fits from
+    other versions carry 10 (old) or 100 (Pixel3DMM-era) under ``smplx_expr``. Pad or
+    truncate to 50: the expression only moves the face surface a little and never
+    the hands, and the occlusion measure needs both only as 2D hulls."""
+    key = geometry.expression_key(npz)
+    expr = np.asarray(npz[key], np.float32)
+    if expr.shape[1] != width:
+        expr = np.pad(expr, ((0, 0), (0, max(0, width - expr.shape[1]))))[:, :width]
+        npz = dict(npz, **{key: expr})
+    return npz
+
+
 def clip_occlusion(fit_path, geometry, extra_regions, fps=None):
-    npz = dict(np.load(fit_path))
+    npz = fit_for_geometry(dict(np.load(fit_path)), geometry)
     vertices = geometry.forward_vertices(npz)
     projected = geometry.project_all_frames(vertices, npz)
     groups = geometry.vertex_groups()
