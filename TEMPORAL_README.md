@@ -182,7 +182,7 @@ Selection, 2026-10-03:
 |---|---|---|---|---|---|---|---|
 | PHOENIX | 1500 (13 without a readable fit) | 872 | 133 | 482 | 100 clips, 9027 clean frames | 20 (Signer07) | 30 (Signer04, 08) |
 | CSL-Daily | 1050 | 547 | 17 | 486 | 100 clips, 14001 clean frames | 20 (P0001) | 30 (P0005, P0007) |
-| How2Sign | pending (4.2d) | | | | 100 | | |
+| How2Sign | 168 chunks of 4 s from 12 shard videos | 17 | 1 | 150 | 87 clips, 7594 clean frames (woman) | 23 (man) | 40 (man) |
 
 PHOENIX train per signer: Signer01 29, 03 28, 05 28, 09 14, 02 1 (Signer06:
 no eligible clip). CSL-Daily train: 25 each for P0000, P0002, P0004, P0008.
@@ -570,7 +570,12 @@ is identical to `rgb2smplx.stages.teaser --batch-size 1`.
 - [x] 5.4 synthetic occlusion (procedural hands until the hand set exists)
 - [x] 5.6 training, 6 evaluation, 5.7 inference + demo flag
 - [x] whole pipeline run end to end on 6 PHOENIX test clips (2026-10-03, see below)
-- [ ] hand set (RGBA) with train / test identities; held-out test set (7.2)
+- [x] pilot dataset built (2026-10-03): 300 + 100 val/test clips over PHOENIX, CSL-Daily,
+  How2Sign; hand banks (1688 training / 974 held-out cut-outs); 1187 synthetic variants;
+  review page with statistics and examples
+- [ ] fix before training: hand placement (anchor on the hand, not the cut-out box),
+  hand scale (hand part only), cut-out artefacts, flat colour transfer; then regenerate variants
+- [ ] held-out test trajectories replaying real hand motion (7.2)
 - [ ] training data (several corpora, signer splits, 4.1-4.2)
 - [ ] real trainings and 8 ablations
 
