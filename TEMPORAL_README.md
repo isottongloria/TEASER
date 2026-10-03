@@ -130,44 +130,68 @@ For the mouth/jaw parameters the weight uses `c_mouth`, for the eyelids
 
 ## 4. Data
 
-### 4.1 Corpora (multi-dataset, signer-disjoint)
+### 4.1 Corpora (continuous signing, signer-disjoint)
 
-Training uses more than one sign language, so the model does not learn one
-studio's lighting, camera and signing style:
+Checked 2026-10-03:
 
-| corpus | signers | signer id from | fps | frames readable now |
+| corpus | clips with a SMPL-X fit (readable) | frames for TEASER | signers | fps |
 |---|---|---|---|---|
-| PHOENIX-2014-T (DGS) | 9 | `speaker` column of `annotations/manual/PHOENIX-2014-T.<split>.corpus.csv` | 25 | test only (642 clips, `RGB2SMPLX/phoenix_data`) |
-| CSL-Daily (CSL) | 10 | clip name `S..._P00NN_T..` | 30 | test only (123 clips, `/leonardo_work/IscrC_SLPSCALE/csl/test`) |
-| How2Sign (ASL) | ~11 | metadata | 24 | 1 clip |
-| others (to decide) | | | | |
+| PHOENIX-2014-T (DGS) `/leonardo_work/IscrC_SLPSCALE/phoenix/phoenix/{train,dev,test}` | 7101 / 523 / 647 (Chang Liu) | readable (`frames/` links into the IscrC_SIGMA scratch) | 9 (`speaker` in the corpus CSV) | 25 |
+| CSL-Daily (CSL, continuous) `/leonardo_work/IscrC_SIGMA/rgb2smplx/csl_daily/csldaily` | 9680 (~40 % of the corpus) | `frames/` deleted; source videos readable in `/leonardo_work/IscrC_SIGMA/csl_daily_crop/videos` (1280x1280, 30 fps); fits made with `--target-fps 30`, so frames = every video frame | P0000-02, P0004-05, P0007-08 (`_P00NN_` in the name) | 30 |
+| CSL-Daily test (ours) `/leonardo_work/IscrC_SLPSCALE/csl/test` | 123 | readable | P0000, P0002-09 | 30 |
+| How2Sign (ASL) | none yet | to extract | ~11 | 24 |
 
-Per clip Track 1 needs only the **frames** and the **hands** (for `c_t_real`);
-TEASER is run by us (`tools_temporal/extract_features.py`, ~4-7 frames/s per
-GPU including MediaPipe). No Pixel3DMM, so the earlier 25-80 GPU-h cost is
-gone. Hands: `wilor.npz` when the RGB2SMPLX pipeline wrote one and we can read
-it; otherwise MediaPipe Hands run during extraction (`--hands mediapipe`), so
-any video folder works.
+Not used: the isolated-sign CSL in `/leonardo_work/IscrC_SIGMA/rgb2smplx/csl`
+(Track 1 needs continuous signing).
 
-**Blocker (2026-10-02):** this account cannot read the train frames of
-PHOENIX (`phoenix/phoenix/train/*/frames` link into
-`/leonardo_scratch/fast/IscrC_SIGMA/...`, and its `wilor/teaser/mediapipe.npz`
-are owner-only) nor any CSL-Daily train work directory
-(`/leonardo_work/IscrC_SIGMA/rgb2smplx/csl*`). Options: read access from the
-IscrC_SIGMA owners; or the full public releases (PHOENIX-2014-T, CSL-Daily,
-How2Sign), downloaded only with explicit approval. Training on PHOENIX/CSL
-**test** clips is not an option: it contaminates the official test splits.
+PHOENIX and CSL-Daily already went through the full RGB2SMPLX pipeline, so
+for them Track 1 needs only the frames and its own TEASER feature cache:
+occlusion and hand masks come from the existing fits. How2Sign needs the full
+pipeline first (no fit = no occlusion meter, no hand masks); it joins in round
+two.
 
-### 4.2 Splits (see also 4.3)
+### 4.2 Pilot dataset: 300 clips
 
-- **Signer-disjoint.** Test signers never appear in training, in any corpus.
-  Per corpus 2 signers are held out for test and 1 for validation, chosen so
-  that test still has enough clips (PHOENIX Signer01/05 have most clips and
-  stay in train). Splits are written once to `configs/temporal/splits/` and
-  never changed.
-- Our existing evaluation sets (the 100 PHOENIX test clips of
-  `phoenix_facesmooth/test`, the CSL test reel) are kept as an extra
-  *real-occlusion* check; they are never trained on.
+Built in this order, so that frames and TEASER are extracted only for the
+clips that are kept:
+
+1. **Candidate pool** per corpus, from the training signers only (4.2b):
+   ~1000 clips each, random, seeded.
+2. **Occlusion meter on the fits** (`compute_real_occlusion.py`, method (a):
+   SMPL-X hands and face from the fit, projected with the fit's camera, the
+   RGB2SMPLX occlusion protocol). Needs no frames.
+3. **Keep the clean ones.** A clip is kept when: occluded frames
+   (`c_mnc > 0.2`) <= 5 %, no episode longer than 15 frames, and at least 3
+   clean 16-frame windows (every frame with `c_mnc < 0.05` and at least 2
+   frames from any real episode, whose neighbours are already corrupted).
+   The synthetic occlusions are pasted on those clean windows, so each pasted
+   frame has a true unoccluded target. The rejected fraction is reported per
+   corpus.
+4. **Pick 300**: 150 PHOENIX + 150 CSL-Daily (How2Sign in round two), at most
+   ~15 clips per signer, seeded.
+5. **Frames**: PHOENIX already there; CSL-Daily regenerated from the source
+   video with RGB2SMPLX's `prepare --target-fps 30`, checked against the fit
+   (same frame count; our TEASER expression vs the fit's `smplx_expr50`).
+6. **TEASER feature cache**, the real-occlusion file, the valid-target mask.
+7. **Hand bank** (5.4) from the same clips; **synthetic variants** (3 per clip).
+
+### 4.2b Splits
+
+- CSL-Daily: the extracted signers are used for train / val; **P0003, P0006,
+  P0009 never appear in the extracted 40 %** and are the test signers, through
+  our own `csl/test` clips (frames and fits readable). Validation: one
+  extracted signer (P0001, the smallest).
+- PHOENIX: 2 test signers and 1 validation signer held out across train, dev
+  and test (chosen from the clip counts), the rest for training.
+- Splits are written once to `configs/temporal/splits/` and never changed.
+- Our existing evaluation sets (the 100 PHOENIX test clips, the CSL test
+  reel) are kept as an extra *real-occlusion* check; never trained on.
+
+### 4.2c Valid targets
+
+Per frame, `target_valid` = `c_mnc < 0.05` and face detected and at least 2
+frames from any real episode (`c_mnc > 0.2`). Target losses use it on top of
+the soft `(1 - c_real)` weight. Clean windows = 16 consecutive valid frames.
 
 ### 4.3 How long real occlusions are
 
@@ -259,13 +283,17 @@ TemporalAdapter(feat_dim, arch='transformer', d_model=256, n_layers=2, window=16
   cropping**, so the face detector and the crop react as they do to a real
   hand.
 - The patches are cut from our own sign-language frames
-  (`tools_temporal/build_hand_bank.py`): frames where a hand is clearly
-  visible and away from the face, hand keypoints (WiLoR or MediaPipe Hands)
-  -> box, alpha by segmentation seeded with the keypoint hull, rejected if the
-  mask is not hand-shaped. Same lighting, resolution, blur and sleeves as the
-  real occluder. A hand's "identity" is the signer it comes from, so the
-  train / test split of the bank follows the signer split (4.2): test hands
-  come from test signers. An external hand image set is only a fallback.
+  (`tools_temporal/build_hand_bank.py`), using the pipeline's fits: frames
+  where WiLoR saw the hand, the hand is away from the face and from the other
+  hand, sharp (Laplacian variance) and large enough; the MANO hand mesh of
+  the fit projected with the fit's camera gives the silhouette, refined on
+  the image with GrabCut, then cropped to RGBA. Hand poses are clustered
+  (MANO pose) so the bank covers different handshapes, not one pose many
+  times. Same lighting, resolution, blur and sleeves as the real occluder.
+  High-resolution hands come from CSL-Daily (1280 px) and are only ever
+  downscaled; PHOENIX hands (20-30 px) are used on PHOENIX only. A hand's
+  identity is its signer, so the bank's train / test split is the signer
+  split (4.2b). An external hand image set is only a fallback.
 - Random scale, rotation, Lab mean/std colour transfer towards the face skin.
 - Trajectories: the hand enters, stays, leaves, over mouth or eyes; position,
   duration and coverage (partial / total) sampled from the real statistics
