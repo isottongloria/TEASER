@@ -46,7 +46,7 @@ def main():
                    check=True)
     subprocess.run([sys.executable, str(REPO_ROOT / "tools_temporal/extract_features.py"),
                     str(args.work_dir), str(cache_npz), "--checkpoint", str(checkpoint),
-                    "--temporal_feats", "all", "--batch-size", "1"],
+                    "--temporal_feats", "expr+pose", "--batch-size", "1"],
                    cwd=REPO_ROOT, env=_env(REPO_ROOT), check=True)
 
     stage, cache = np.load(stage_npz), np.load(cache_npz)

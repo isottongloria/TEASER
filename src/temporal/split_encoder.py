@@ -31,11 +31,12 @@ BRANCHES = {
 # tf_mobilenetv3_large_minimal_100 -> 960, tf_mobilenetv3_small_minimal_100 -> 576.
 FEATURE_DIMS = {"expr": 960, "pose": 576, "shape": 960}
 
-# --temporal_feats choices -> branches whose features the adapter sees.
+# --temporal_feats choices -> branches whose features the adapter sees. Shape
+# is per-identity, not per-frame, so it is never an adapter input; its head
+# still runs for TEASER's own outputs.
 FEATURE_SETS = {
     "expr": ("expr",),
     "expr+pose": ("expr", "pose"),
-    "all": ("expr", "pose", "shape"),
 }
 
 

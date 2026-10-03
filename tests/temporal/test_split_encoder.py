@@ -78,6 +78,7 @@ class SplitEncoderTest(unittest.TestCase):
     def test_concat_split_roundtrip(self):
         torch.manual_seed(4)
         feats = {name: torch.randn(2, 4, dim) for name, dim in se.FEATURE_DIMS.items()}
+        self.assertEqual(set(se.FEATURE_SETS), {"expr", "expr+pose"})
         for feature_set, names in se.FEATURE_SETS.items():
             flat = se.concat_features(feats, feature_set)
             self.assertEqual(flat.shape[-1], se.feature_dim(feature_set))

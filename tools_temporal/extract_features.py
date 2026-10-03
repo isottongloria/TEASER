@@ -1,14 +1,14 @@
 """Feature cache for temporal TEASER (TEMPORAL_README.md, 4.1).
 
     python tools_temporal/extract_features.py <work_dir> <out.npz> \
-        --checkpoint pretrained_models/TEASER.pt [--temporal_feats expr|expr+pose|all] [--save_spatial]
+        --checkpoint pretrained_models/TEASER.pt [--temporal_feats expr|expr+pose] [--save_spatial]
 
 Runs TEASER's frozen encoders on ``<work_dir>/frames`` (an RGB2SMPLX work
 directory) with the crops of ``rgb2smplx/stages/teaser.py`` and writes one
 ``.npz`` per clip: the pooled features the adapter trains on, TEASER's own
 per-frame outputs (the same keys as ``teaser.npz``), the crop transform and
 the landmarks. The expression feature is always stored; pose and shape
-features only when ``--temporal_feats`` asks for them.
+feature only when ``--temporal_feats expr+pose`` asks for it.
 
 One difference from the RGB2SMPLX stage, on purpose: MediaPipe Pose's tracker
 is reset before each clip, so a clip's first frames never depend on which clip
@@ -136,9 +136,9 @@ def main():
     parser.add_argument("work_dir", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--checkpoint", type=Path, default=REPO_ROOT / "pretrained_models/TEASER.pt")
-    parser.add_argument("--temporal_feats", choices=("expr", "expr+pose", "all"), default="expr")
+    parser.add_argument("--temporal_feats", choices=("expr", "expr+pose"), default="expr")
     parser.add_argument("--save_spatial", action="store_true",
-                        help="also store the pre-pool 7x7 maps (fp16, ~94 KB/frame per large branch)")
+                        help="also store the pre-pool 7x7 maps (fp16, ~94 KB/frame for expr)")
     parser.add_argument("--face-detection-mode", choices=("pose_roi", "direct"), default="pose_roi")
     parser.add_argument("--crop-scale", type=float, default=1.4)
     parser.add_argument("--roi-size", type=int, default=512)

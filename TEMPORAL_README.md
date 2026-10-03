@@ -3,23 +3,39 @@
 TEASER is a per-frame regressor: each frame's face crop goes through four
 independent MobileNetV3 encoders and a linear head, and nothing ties frame *t*
 to *t+1* -- no temporal layer, no temporal loss, video datasets sampled one
-frame at a time (`K: 1` in both configs, and `K` / `LRS3_temporal_sampling`
-are not read anywhere in the code). Applied to sign-language video this gives
-visible jitter in expression/jaw, worst when a hand comes close to or covers
-the mouth. Today the coherence is added afterwards: Savitzky-Golay window 9
-on the fitted SMPL-X (SG9), then a cubic Hermite splice over short hand-face
+frame at a time (`K: 1` in both configs; `K` and `LRS3_temporal_sampling` are
+not read anywhere in the code).
+
+In sign-language video the hands often pass in front of the face. TEASER,
+seeing one frame at a time, is then wrong on the occluded frames and jittery
+around them. Today coherence is added afterwards: Savitzky-Golay window 9 on
+the fitted SMPL-X (SG9), then a cubic Hermite splice over short hand-face
 occlusion episodes (`rgb2smplx/stages/face_jitter_fix.py` in RGB2SMPLX). The
-splice is wrong exactly where it matters: the mouth keeps articulating
+splice is wrong where it matters most: the mouth keeps articulating
 (mouthing) under the hand, and the frames next to the occlusion are already
 corrupted.
 
-This branch adds a small temporal module that works on the latent features of
-TEASER's frozen encoders, before the regression heads, trained with offline
-pseudo-GT from Pixel3DMM and self-distillation from TEASER itself, plus
-synthetic hand occlusion so that occluded frames have a real target.
+## 0. Two problems, two tracks
 
-**Status:** plan agreed 2026-10-02; implementation in progress (see
-[Progress](#progress)).
+| | goal | status |
+|---|---|---|
+| **Track 1** -- temporal coherence | make TEASER use neighbouring frames, so it is stable and robust to hand occlusion; teacher = TEASER itself | **this document, in progress** |
+| Track 2 -- better face representation | improve what TEASER predicts (eyes, mouth detail) with extra supervision, e.g. Pixel3DMM pseudo-GT | parked, see 10 |
+
+The two were first planned as one (Pixel3DMM as the target of the temporal
+module); they are now separate so each result can be attributed. Track 1
+does not depend on Track 2 in any way.
+
+**What Track 1 can and cannot do.** The gain comes from two things the model
+learns: to use the visible frames before and after the hand, and that the
+features of a covered face are unreliable. Expect the largest improvement on
+*partial* occlusions and on the frames *next to* an occlusion. Under a long,
+total occlusion the mouthing is simply not in the video: no model recovers it,
+the best is a plausible continuation from context. The success criteria (7)
+are there to tell a real temporal model from aggressive smoothing.
+
+**Status:** Track 1 plan agreed 2026-10-03. Step 1 (split encoder + feature
+cache) done and verified; see 12.
 
 ---
 
@@ -31,173 +47,163 @@ synthetic hand occlusion so that occluded frames have a real target.
   original: same outputs, same checkpoints. A test checks it numerically.
 - New code lives in `src/temporal/` and `tools_temporal/`. Existing files get
   at most an `if args.temporalize_teaser:` branch. `TeaserEncoder` itself is
-  not modified: the split forward (features -> heads) is reimplemented in
-  `src/temporal/split_encoder.py` and a test checks it equals
+  not modified: the split forward (features -> heads) lives in
+  `src/temporal/split_encoder.py`, and a test checks it equals
   `TeaserEncoder.forward` bit for bit.
 - Sub-options are dedicated flags, only read when `--temporalize_teaser` is ON.
 - Work happens on the `temporal` branch of the fork (worktree
   `/leonardo_work/IscrC_SLPSCALE/TEASER_temporal`), not on the submodule
-  checkout that RGB2SMPLX production runs from. The RGB2SMPLX pipeline is not
-  touched until the ablations pick a winner (see 9).
+  checkout RGB2SMPLX production runs from. RGB2SMPLX is not touched until the
+  ablations pick a winner; then the output is `teaser_temporal.npz` with the
+  same keys as `teaser.npz`, so `--face teaser` reads it unchanged.
 
 ---
 
-## 2. What the code actually is (Phase 0 findings)
+## 2. The model as it is (Phase 0 findings)
 
-Measured by running the real model (TEASER env, `pretrained_models/TEASER.pt`;
-`Teaser.pt`, `TEASER.pt`, `TEASER_v1.pt` are the same file, md5 `ba1bbcae...`).
+Measured on the real model (TEASER env, `pretrained_models/TEASER.pt`;
+`Teaser.pt`, `TEASER.pt`, `TEASER_v1.pt` are the same file).
 
 | Encoder | timm backbone | pooled feature | head |
 |---|---|---|---|
 | Pose | `tf_mobilenetv3_small_minimal_100` | **576** | `Linear(576->6)`: `[0:3]` pose (axis-angle), `[3:6]` cam `[s,tx,ty]` (orthographic) |
-| Shape | `tf_mobilenetv3_large_minimal_100` | **960** | `Linear(960->300)` |
+| Shape | `tf_mobilenetv3_large_minimal_100` | 960 | `Linear(960->300)` |
 | Expression | `tf_mobilenetv3_large_minimal_100` | **960** | `Linear(960->55)`: `[0:50]` expr, `[50:52]` eyelid `clamp(0,1)`, `[52]` jaw open `ReLU`, `[53:55]` jaw `clamp(+-0.2)` |
-| Token | `tf_mobilenetv3_small_minimal_100` | 4 x 256 (multi-scale) | only used by the training-time generator |
+| Token | `tf_mobilenetv3_small_minimal_100` | 4 x 256 | only used by the training-time generator |
 
-- Pooling: `adaptive_avg_pool2d(features[-1], 1)` on the 7x7 map, then a
-  **single** linear layer. `--temporal_feats all` = 960 + 576 + 960 = 2496.
-- Consequence: with a frozen linear head, a feature delta acts on the output
-  only through `W @ delta_f`, so a feature-space adapter is equivalent to a
-  55-dim parameter residual whose *input* is the 960-dim feature. Its edge over
-  a parameter-space smoother (SmoothNet) is the richer input. It also means
-  LoRA on the head is meaningless (the head is 53k parameters, as cheap as
-  full fine-tuning): `--temporal_head` is `frozen | full` only (decision D).
-- FLAME: `assets/FLAME2020/generic_model.pkl`, 300 shape + 50 expression;
-  neck and eyeballs fixed at defaults (**no gaze**); eyelids are two extra
-  vertex blendshapes (`assets/l_eyelid.npy`, `r_eyelid.npy`), the same ones
-  Pixel3DMM uses.
-- Region masks: `assets/FLAME_masks/FLAME_masks.pkl` (tracked in the repo).
-  Regions used by the losses and metrics (`src/temporal/flame_regions.py`):
-  - **mouth** = `lips` (250 unique vertices)
-  - **eyes** = (`eye_region` U eyelid-blendshape support) - eyeballs
-  - **rest** = `face` - mouth - eyes
-  Eyeballs are excluded everywhere: TEASER predicts no gaze.
-- Pixel3DMM runs FLAME 2020 with 100 expressions; TEASER's 50 are the first 50
-  of the same basis. So `refit50` is a per-frame least squares (linear in
-  expression given the jaw, small nonlinear jaw fit), and the `vertices` target
-  carries an irreducible floor (components 51-100).
-- Original training (`main/train.py`, OmegaConf + `src/teaser_trainer.py`)
-  cannot run here: `datasets/preprocess_scripts/landmark.onnx` (203-landmark
-  model) and the training datasets are missing. Temporal training is therefore
-  a separate script, `tools_temporal/train_temporal.py`, that never imports
-  the original trainer.
-- Video inference in RGB2SMPLX (`rgb2smplx/stages/teaser.py`): pose-ROI ->
-  FaceLandmarker landmarks (gaps interpolated), crop at scale 1.4 to 224,
-  per-frame forward (`--batch-size` only concatenates). `teaser.npz` does not
-  store the crop transform; the feature cache does.
-- Batch size matters numerically: batch 1 reproduces the per-frame output bit
-  for bit; batched convs move expression by ~5e-3 (cuDNN kernel choice). Cache
-  extraction defaults to batch 1 so the cached outputs equal `teaser.npz`.
+- Pooling is `adaptive_avg_pool2d(features[-1], 1)` on the 7x7 map, then a
+  **single** linear layer. The adapter sees the expression feature (960), and
+  optionally the pose feature too (`--temporal_feats expr+pose`, 1536). Shape
+  is per-identity, never an adapter input.
+- With a frozen linear head a feature delta acts on the output only through
+  `W @ delta_f`: a feature-space adapter is a 55-dim parameter residual whose
+  *input* is the 960-dim feature. Its edge over SmoothNet (parameters in,
+  parameters out) is that richer input -- the 960 features can carry "this
+  face is covered" in a way 55 parameters cannot. That is exactly what T3 vs
+  T4 measures. LoRA on a 53k-parameter head is pointless:
+  `--temporal_head frozen | full`.
+- FLAME 2020 (`assets/FLAME2020/generic_model.pkl`), 300 shape + 50
+  expression; neck and eyeballs fixed (**no gaze**); eyelids are two extra
+  vertex blendshapes (`assets/l_eyelid.npy`, `r_eyelid.npy`).
+- Regions for losses and metrics (`src/temporal/flame_regions.py`), from
+  `assets/FLAME_masks/FLAME_masks.pkl`:
+  **mouth** = `lips` (250 vertices); **eyes** = (`eye_region` U eyelid
+  blendshape support) - eyeballs; **rest** = `face` - mouth - eyes. Eyeballs
+  are excluded everywhere (no gaze). Vertices are canonical: FLAME with a fixed
+  shared identity, global/neck/eye rotation zero, so the comparison isolates
+  expression, jaw and eyelids.
+- The original training (`main/train.py`) cannot run here
+  (`datasets/preprocess_scripts/landmark.onnx` and its datasets are missing);
+  temporal training is a separate script that never imports it.
+- Crops in RGB2SMPLX (`rgb2smplx/stages/teaser.py`): pose-ROI ->
+  FaceLandmarker landmarks (gaps interpolated), crop at scale 1.4 to 224.
+  Batch size matters numerically: batch 1 reproduces per-frame output bit for
+  bit, batched convs move expression by ~5e-3.
 
 ---
 
-## 3. Data
+## 3. Teacher, targets and real occlusion
 
-| Set | Clips | Pixel3DMM | TEASER | hands (`wilor.npz`) | use |
-|---|---|---|---|---|---|
-| PHOENIX train subset | 300 (to run) | to run | yes | yes | train |
-| CSL-Daily train subset | 300 (to run) | to run (30 fps) | yes | yes | train |
-| PHOENIX test (`phoenix_facesmooth/test`) | 100 | yes | in the corpus | yes | test only |
-| Multiface (`multiface/mf50`) | 49 | yes | yes | n/a (no hands) | test, **real 3D GT** |
+The teacher is **the original, frozen TEASER**. No external pseudo-GT.
 
-- Selection of the train subsets by `c_t` from `wilor.npz`: **~75 % clean,
-  ~25 % with real hand-face occlusion**. Clean clips give pseudo-GT that is
-  valid on every frame, so every synthetic occlusion pasted on them has a full
-  target; one clean clip yields many training samples (different hands,
-  trajectories, timings each epoch). Real occluded clips are kept for the
-  frames near occlusion (where Pixel3DMM is still usable), to train the gate on
-  real `c_t`, and for the real-world test.
-- Pixel3DMM costs ~490 s/clip/GPU (PHOENIX): 600 clips ~ 80 GPU-h. The tracker
-  per-frame loss is dumped too when re-running (gives an optional confidence
-  weight; without it the weight is 1).
-- Never train on PHOENIX test, Multiface or the reel clips.
+- On a frame of the original video, the target is TEASER's own per-frame
+  prediction on that frame.
+- **Frames that are really occluded in the original video have no valid
+  target** (TEASER is wrong there -- that is the problem being solved). Every
+  per-frame target loss is multiplied by `(1 - c_t_real)`, in every window,
+  clean or augmented. With `--real_occ_hard_thresh` (default 0.5) a frame
+  above the threshold gets weight 0 outright.
+- A synthetic hand pasted on a frame that is already really occluded gives
+  no target either: weight 0.
+- Real occlusion therefore enters training only as *input*: the model sees
+  those frames but is never pulled towards TEASER's output on them.
 
-### Data access (found 2026-10-02) -- blocks training
-
-| corpus / split | frames readable by this account | per-clip npz |
-|---|---|---|
-| PHOENIX train (`phoenix/phoenix/train`, 7101 clips) | **no**: `frames/` link into `/leonardo_scratch/fast/IscrC_SIGMA/signdata/...` | `wilor/teaser/mediapipe.npz` mode 600 (owner only); `fit_gvhmr*.npz` readable |
-| PHOENIX test | yes (`RGB2SMPLX/phoenix_data`, 642 clips; the local tarball holds only test) | yes |
-| CSL-Daily train | **no**: `/leonardo_work/IscrC_SIGMA/rgb2smplx/csl*` permission denied | -- |
-| CSL-Daily test (`csl/test`, 123 clips) | yes | yes |
-
-Pixel3DMM and TEASER both need the frames, so the train subsets cannot be
-built until read access to those frames exists (or PHOENIX-2014-T is fetched
-in full). Clip selection does not need frames: it runs on the readable fits.
-
-- Clip selection: `tools_temporal/select_train_clips.py` (RGB2SMPLX env) scores
-  clips with RGB2SMPLX's own jitter-fix occlusion measure on the fitted
-  SMPL-X. Fully clean clips are rare (PHOENIX train sample: 14 of 20 clips had
-  an occluded frame, the clean ones all short), so "clean" = at most 5 %
-  occluded frames, "occluded" = at least 10 %, clips of at least 32 frames.
-- Pixel3DMM throughput on PHOENIX: ~12 clips per GPU-hour (2 workers on one
-  A100, `experiments/occlusion_protocols_smplx/pixel3dmm/run_pixel3dmm_phoenix.sbatch`
-  in RGB2SMPLX, reused unchanged): 300 clips ~ 25 GPU-h.
-- Dumping the tracker loss (decision E) would mean changing RGB2SMPLX's
-  `rgb2smplx/stages/pixel3dmm.py`; not done (main pipeline stays untouched),
-  so the Pixel3DMM confidence weight is 1.
-
-### Why synthetic occlusion is the training signal and real occlusion still matters
-
-On a real occluded frame there is no target: Pixel3DMM is unreliable there
-too (its loss is switched off by `(1 - c_t)`). Pasting a hand on a clean clip
-gives the target for free (the clean frame's pseudo-GT / TEASER output). Real
-occluded clips still matter because (1) pasted PNG hands miss shadows, blur,
-contact deformation and depth order, and a model trained only on pastes can
-learn paste artefacts; (2) under real occlusion the face *detector* drifts and
-the crop itself jumps -- reproduced only if the hand is pasted on the **full
-frame before detection and cropping** (the default here); (3) the goal is real
-video, so the final test must include real occlusion, measured with metrics
-that need no GT (jitter/jerk, near-occlusion behaviour, mouth continuity).
+`c_t_real` comes from the real hands (4.2), per region (`c_mouth`, `c_eyes`).
+For the mouth/jaw parameters the weight uses `c_mouth`, for the eyelids
+`c_eyes`; for vertex losses each region uses its own `c`.
 
 ---
 
-## 4. Components
+## 4. Data
 
-### 4.1 Feature extraction and cache -- `tools_temporal/extract_features.py`
+### 4.1 Corpora (multi-dataset, signer-disjoint)
 
-Runs TEASER's frozen encoders on a work directory's `frames/` with the exact
-crop pipeline of `rgb2smplx/stages/teaser.py` and writes one `.npz` per clip:
+Training uses more than one sign language, so the model does not learn one
+studio's lighting, camera and signing style:
+
+| corpus | signers | signer id from | fps | frames readable now |
+|---|---|---|---|---|
+| PHOENIX-2014-T (DGS) | 9 | `speaker` column of `annotations/manual/PHOENIX-2014-T.<split>.corpus.csv` | 25 | test only (642 clips, `RGB2SMPLX/phoenix_data`) |
+| CSL-Daily (CSL) | 10 | clip name `S..._P00NN_T..` | 30 | test only (123 clips, `/leonardo_work/IscrC_SLPSCALE/csl/test`) |
+| How2Sign (ASL) | ~11 | metadata | 24 | 1 clip |
+| others (to decide) | | | | |
+
+Per clip Track 1 needs only the **frames** and the **hands** (for `c_t_real`);
+TEASER is run by us (`tools_temporal/extract_features.py`, ~4-7 frames/s per
+GPU including MediaPipe). No Pixel3DMM, so the earlier 25-80 GPU-h cost is
+gone. Hands: `wilor.npz` when the RGB2SMPLX pipeline wrote one and we can read
+it; otherwise MediaPipe Hands run during extraction (`--hands mediapipe`), so
+any video folder works.
+
+**Blocker (2026-10-02):** this account cannot read the train frames of
+PHOENIX (`phoenix/phoenix/train/*/frames` link into
+`/leonardo_scratch/fast/IscrC_SIGMA/...`, and its `wilor/teaser/mediapipe.npz`
+are owner-only) nor any CSL-Daily train work directory
+(`/leonardo_work/IscrC_SIGMA/rgb2smplx/csl*`). Options: read access from the
+IscrC_SIGMA owners; or the full public releases (PHOENIX-2014-T, CSL-Daily,
+How2Sign), downloaded only with explicit approval. Training on PHOENIX/CSL
+**test** clips is not an option: it contaminates the official test splits.
+
+### 4.2 Splits
+
+- **Signer-disjoint.** Test signers never appear in training, in any corpus.
+  Per corpus 2 signers are held out for test and 1 for validation, chosen so
+  that test still has enough clips (PHOENIX Signer01/05 have most clips and
+  stay in train). Splits are written once to `configs/temporal/splits/` and
+  never changed.
+- Our existing evaluation sets (the 100 PHOENIX test clips of
+  `phoenix_facesmooth/test`, the CSL test reel) are kept as an extra
+  *real-occlusion* check; they are never trained on.
+
+---
+
+## 5. Components
+
+### 5.1 Feature cache -- `tools_temporal/extract_features.py` (done)
+
+Runs TEASER's frozen encoders on `<clip>/frames` with the exact crop pipeline
+of `rgb2smplx/stages/teaser.py`; one `.npz` per clip:
 
 | key | shape | notes |
 |---|---|---|
 | `feat_expr` | (T, 960) fp16 | always |
-| `feat_pose` | (T, 576) fp16 | `--temporal_feats expr+pose` or `all` |
-| `feat_shape` | (T, 960) fp16 | `--temporal_feats all` |
-| `expression`, `jaw_pose`, `eyelid`, `pose_params`, `cam`, `shape_params` | as `teaser.npz` | TEASER's own outputs |
+| `feat_pose` | (T, 576) fp16 | `--temporal_feats expr+pose` |
+| `expression`, `jaw_pose`, `eyelid`, `pose_params`, `cam`, `shape_params` | as `teaser.npz` | TEASER's outputs = the teacher |
 | `tform` | (T, 3, 3) | frame px -> 224 crop px |
 | `landmarks` | (T, 478, 2) | frame px, interpolated where not detected |
-| `face_detected`, `valid` | (T,) bool | |
-| `frame_index` | (T,) | position in `frames/` |
-| `fps`, `crop_scale`, `checkpoint_md5` | scalars | |
+| `face_detected`, `pose_valid`, `valid` | (T,) bool | |
+| `frame_index`, `fps`, `crop_scale`, `checkpoint_md5` | | |
 
-`--save_spatial` additionally stores the pre-pool 7x7x960 map (fp16,
-~94 KB/frame) in case spatial information turns out to matter under occlusion.
-With synthetic occlusion active the forward is done online instead (encoders
-frozen, `no_grad`).
+`--save_spatial` adds the pre-pool 7x7x960 map (~94 KB/frame), in case spatial
+information turns out to matter under occlusion. MediaPipe Pose's tracker is
+reset per clip (the RGB2SMPLX stage does not reset it between clips run in
+one process; for one clip in a fresh process the two are identical).
 
-### 4.2 Pixel3DMM pseudo-GT -- `tools_temporal/prepare_p3dmm_targets.py`
+### 5.2 Real occlusion `c_t_real` and its statistics -- `src/temporal/occlusion_conf.py`, `tools_temporal/occlusion_stats.py`
 
-Reads the `pixel3dmm.npz` the RGB2SMPLX stage already writes (same `frames/`,
-so frame alignment is by index, checked), never runs Pixel3DMM.
-`--p3dmm_target`:
-- `vertices`: canonical face vertices, FLAME(shape = reference identity,
-  expr100, jaw, eyelid, global = neck = eyes = 0). Reference identity is the
-  same for prediction and target so the loss isolates expression/jaw/eyelid.
-- `refit50`: per-frame fit of 50 expr + jaw in TEASER's space minimising
-  per-vertex L2 to the `vertices` mesh; eyelids copied (same blendshapes).
-  Stores the fit residual per frame.
-Optional per-frame tracker loss -> `p3dmm_conf`.
+- Hand polygons: convex hull of the 2D hand keypoints (WiLoR / MediaPipe Hands
+  / a generic `(T, H, K, 2)` NPZ), mapped into the 224 crop with `tform`.
+- Region polygons: TEASER's canonical-region vertices projected with its own
+  orthographic `cam`.
+- `c_mouth`, `c_eyes` = area(hands n region) / area(region), in [0, 1].
+  Missing hands -> `c = 0` with a warning.
+- `occlusion_stats.py` aggregates `c_t_real` over the **training** signers of
+  each corpus into `configs/temporal/occlusion_stats_<corpus>.json`: episode
+  length distribution, episodes per second, IoA distribution inside an
+  episode (partial vs total), which region. Synthetic occlusions are sampled
+  from it (5.4).
 
-### 4.3 Occlusion confidence `c_t` -- `src/temporal/occlusion_conf.py`, `tools_temporal/compute_occlusion_conf.py`
-
-Hand polygons (convex hull of 2D keypoints; `wilor.npz` `hand_keypoints_xy`,
-or a generic JSON/NPZ of `(T, H, K, 2)`) mapped into the 224 crop with
-`tform`; mouth / eye region polygons from TEASER's FLAME vertices projected
-with its own orthographic `cam`. `c_mouth`, `c_eyes` = intersection over the
-region's area, in [0, 1]. Missing keypoints -> `c = 0` with a warning.
-
-### 4.4 Temporal adapter -- `src/temporal/adapter.py`
+### 5.3 Temporal adapter -- `src/temporal/adapter.py`
 
 ```
 TemporalAdapter(feat_dim, arch='transformer', d_model=256, n_layers=2, window=16,
@@ -205,170 +211,250 @@ TemporalAdapter(feat_dim, arch='transformer', d_model=256, n_layers=2, window=16
   .forward(f: (B,T,F), c: (B,T,2) | None, frame_mask: (B,T) bool | None)
       -> f_tilde (B,T,F), aux {'delta', 'gate'}
 ```
-- `--temporal_arch transformer | tcn | gru` (2-4 layers / dilated residual
-  1D conv / bidirectional GRU), input/output projections to `d_model`,
-  positional encoding for the transformer.
-- `--temporal_window` (default 16 frames, sweep 8/16/32), `--temporal_causal`.
-- `--temporal_fusion`: `residual` (`f + delta`), `gated`
-  (`f + g * delta`, `g = sigmoid(MLP([f, delta, c]))`), `replace`
-  (`alpha * f + T(f)`, `alpha` learned, starts at 1 -- TCMR-style but still
-  identity at init, decision F).
-- Output layer zero-initialised: at init the output equals TEASER for every
+- `--temporal_arch transformer | tcn | gru` (2-4 layers / dilated residual 1D
+  conv / bidirectional GRU), in/out projections to `d_model`, positional
+  encoding for the transformer.
+- `--temporal_window` (default 16 frames; sweep 8/16/32), `--temporal_causal`.
+- `--temporal_fusion`: `residual` (`f + delta`); `gated` (`f + g * delta`,
+  `g = sigmoid(MLP([f, delta, c]))`); `replace` (`alpha * f + T(f)`, `alpha`
+  learned and starting at 1, so still identity at init).
+- Output layer zero-initialised: at init the output **equals TEASER** for every
   fusion mode (tested).
-- `--temporal_mask_token`: learned `[MASK]` replacing random frames in
-  training (`--frame_mask_p 0.3`) and, optionally at inference, frames with
-  `c_t > --occ_mask_thresh`.
+- `--temporal_mask_token`: learned `[MASK]` that replaces the features of
+  random frames in training (`--frame_mask_p`, default 0.15) and, optionally
+  at inference, frames with `c_t > --occ_mask_thresh`.
+- `c_t` given to the adapter at inference is the real one (5.2); in training
+  it is real `c` combined with the synthetic one (`max`).
 - `--temporal_head frozen | full` (default `frozen`).
 - Long videos: sliding window, default **overlap-add** (Hann, stride 4);
   `center` mode optional; edges padded by reflection.
 
-### 4.5 Losses -- `src/temporal/losses.py` (weight 0 = off)
+### 5.4 Synthetic occlusion -- `src/temporal/occlusion_aug.py` (`--synthetic_occlusion`)
 
-- `L_p3dmm_vertices`: L1 on canonical vertices, region weights
-  `--w_region_eyes/--w_region_mouth/--w_region_rest`, weighted by
-  `(1 - c_t)` per region and by `p3dmm_conf` if present. On synthetic
-  occlusion, the target is the clean frame's, unweighted.
-- `L_teaser_mouth`: position-only self-distillation on lip vertices and jaw
-  against TEASER on the **clean** frame, pre-filtered with **SG5** (raw would
-  teach the jitter, SG9 blunts fast mouthing). Decision C.
-- `L_params` (optional, `refit50`): L2 on parameters.
-- `L_accel`: vertex acceleration error **against Pixel3DMM** only (never
-  against TEASER, which would re-teach the jitter; never towards zero).
-- `L_lipread` (`--lipread_loss`): documented interface / stub for SPECTRE's
-  lipreader; no weights downloaded without asking.
+- RGBA hand patches (a folder of PNGs, user-provided), pasted on the **full
+  frame before detection and cropping**, so the face detector and the crop
+  react as they do to a real hand.
+- Random scale, rotation, Lab mean/std colour transfer towards the face skin.
+- Trajectories: smooth within the window (enter, stay, leave), over mouth or
+  eyes; position, duration and coverage (partial / total) sampled from the
+  real statistics of 5.2, including long and partial occlusions, not only
+  short total ones.
+- Returns the synthetic `c_t`, computed from the pasted alpha mask with the
+  same region polygons as `c_t_real`.
+- **Hold-out for the test set** (7.2): the hand PNGs are split once into
+  train / test identities (`--hands_split`), and the test set also uses a
+  second trajectory generator that replays real hand motion (2D keypoint
+  tracks of held-out signers) instead of the parametric one.
 
-### 4.6 Synthetic occlusion -- `src/temporal/occlusion_aug.py` (`--synthetic_occlusion`)
+### 5.5 Losses -- `src/temporal/losses.py` (weight 0 = off)
 
-RGBA hand patches (user-provided folder) pasted over mouth/eyes on the **full
-frame before detection and cropping**, smooth trajectories within the window,
-random scale/rotation, Lab mean/std colour transfer towards the face skin.
-`--occ_aug_p` per clip, duration 2..T frames. Returns the synthetic `c_t`
-computed from the pasted alpha mask.
+All per-frame target terms carry the real-occlusion weight of 3.
 
-### 4.7 Training and inference
+- `L_self`: on frames with a valid target, L1 between the adapter's output and
+  TEASER per-frame, on canonical vertices (per-region weights
+  `--w_region_mouth/eyes/rest`) or on the 55 parameters --
+  `--self_target vertices | params`.
+- `L_occ`: on frames covered by a synthetic hand (and their +-k neighbours),
+  the target is TEASER on the **original, unoccluded** frame. Same form and
+  weights as `L_self`, separate weight `--w_occ`.
+- `L_accel`: penalises the second difference of the **predicted** vertices
+  (towards zero), weight `--w_accel`. Its sweep is the main stability vs
+  fidelity trade-off; the success criteria (7.1) are what keeps it honest.
+- `--self_target_smoothed`: variant where the target of `L_self`/`L_occ` is
+  TEASER + SG9 instead of raw TEASER (an ablation, not the default).
 
-- `tools_temporal/train_temporal.py`: windows of T frames from the caches,
-  OmegaConf config (`configs/temporal/*.yaml`), logging, checkpoints of the
-  adapter only (+ head if `full`).
-- Demo (`main/demo_video.py`) and `tools_temporal/infer_clip.py`: with
-  `--temporalize_teaser --temporal_ckpt path`, encoder -> adapter -> heads.
-  Output for RGB2SMPLX: `teaser_temporal.npz`, same keys as `teaser.npz`, so
-  `--face teaser` reads it unchanged.
+### 5.6 Training recipe -- `tools_temporal/train_temporal.py`
 
-### 4.8 Baselines -- `src/temporal/postproc.py` (`--postproc`)
+Per training window of T frames:
+1. With probability `--occ_aug_p` (default 0.5) the window gets synthetic
+   occlusion; otherwise it stays clean.
+2. In an occluded window the hand covers a contiguous part of it -- from a few
+   frames to almost all of it, duration sampled from the real statistics --
+   with total and partial coverage; the frames before and after stay visible,
+   and those are the frames the model has to learn to use.
+3. Independently, frame masking (`[MASK]` in place of some features) as a
+   third, simpler kind of disturbance.
+4. In every window, clean or not, per-frame target losses are attenuated by
+   `(1 - c_t_real)` (3).
+
+Clean windows come from the feature cache; occluded windows need an online
+encoder forward on the pasted frames (encoders frozen, `no_grad`), which
+dominates the cost. `--occ_curriculum`: optional, a few epochs with p = 0,
+then p ramps up -- only if training is unstable at the start.
+
+OmegaConf configs in `configs/temporal/*.yaml`; checkpoints hold the adapter
+only (+ head if `full`).
+
+### 5.7 Inference
+
+Demo (`main/demo_video.py`) and `tools_temporal/infer_clip.py`: with
+`--temporalize_teaser --temporal_ckpt path`, encoder -> adapter -> heads;
+without the flag, as before. Output `teaser_temporal.npz`.
+
+### 5.8 Baselines -- `src/temporal/postproc.py` (`--postproc`)
 
 - `sg9`: Savitzky-Golay window 9 on the parameters.
 - `interp`: faithful copy of RGB2SMPLX's Hermite splice (episodes <= 15
-  frames, +-1 extension, IoA threshold 0.20) -- copied, not imported, because
-  TEASER's env is Python 3.9.
+  frames, +-1 extension, IoA threshold 0.20); copied, not imported (TEASER's
+  env is Python 3.9).
 - `smoothnet`: light SmoothNet (per-dimension residual FC over time, sliding
-  window) on the 55 parameters, trained on TEASER outputs with Pixel3DMM
-  targets, same dataloader.
-- SPECTRE: not integrated; `eval_temporal.py --external_preds dir` loads its
-  predictions (same 50 FLAME 2020 expr + jaw space).
-
-### 4.9 Evaluation -- `tools_temporal/eval_temporal.py`
-
-Reported separately on **clean**, **near-occlusion** (+-`--near_k`, default
-3) and **occluded** frames:
-- vertex acceleration error and jitter;
-- lip vertex error (per-frame max L2 over lip vertices, averaged);
-- eye/eyelid vertex error, eye-aspect-ratio on blinks;
-- full-face vertex error;
-- FPS and ms/frame.
-Synthetic-occlusion test: occlude clean clips and compare with (main) the
-**same model on the clean clip** (consistency), (secondary) Pixel3DMM.
-**Multiface + synthetic hands** against the real 3D GT is the headline number.
-Output CSV/JSON; `tools_temporal/aggregate_results.py` builds the table.
+  window) on the 55 parameters, trained with **the same self-supervised
+  recipe** as the adapter (same windows, synthetic occlusion, `L_self`,
+  `L_occ`, `L_accel`), so the only difference is its input.
+- SPECTRE (optional): not integrated; `eval_temporal.py --external_preds dir`.
 
 ---
 
-## 5. Ablations (`configs/temporal/`, `tools_temporal/run_ablations.sh`)
+## 6. Evaluation -- `tools_temporal/eval_temporal.py`
 
-Baselines: **B0** TEASER per-frame; **B1** B0 + SG9; **B2** B0 + Hermite
-interpolation (current pipeline); **B3** B0 + SmoothNet (Pixel3DMM target);
-**B4** SPECTRE (external predictions).
+Everything reported separately on **clean**, **near-occlusion** (+-`--near_k`,
+default 3) and **occluded** frames.
 
-Temporal TEASER (all `--temporalize_teaser`):
-- **A1** transformer, `residual`, T=16, `L_p3dmm_vertices` + `L_accel`
-- **A2** A1 + `L_teaser_mouth`
-- **A3** A2 + `gated` with `c_t`
-- **A4** A3 + `--temporal_mask_token` + frame masking
-- **A5** A4 + `--synthetic_occlusion`
-- **A6** A5 + `--lipread_loss` (if integrated)
-- **A7** A5 + `--temporal_head full` (replaces the LoRA variant, decision D)
-
-Secondary, on A5: transformer / tcn / gru; T = 8 / 16 / 32 (also the fps
-check: if 32 wins only on CSL, switch the window to seconds); causal vs not;
-features `expr` / `expr+pose` / `all`; target `vertices` / `refit50`.
-
-Defaults: `--temporal_feats expr`, `gated`, transformer 2 layers d=256
-(~1.5 M parameters, negligible next to the encoders).
+- **Stability:** vertex acceleration and jitter (mouth, eyes, whole face).
+- **Fidelity on clean frames:** vertex error vs TEASER per-frame, per region.
+- **Recovery under synthetic occlusion:** occlude clips of the test set (7.2)
+  and compare with **TEASER on the same clip unoccluded** (mouth, eyes,
+  total). Secondary: the same model on the unoccluded clip (consistency).
+- **Real occlusion** (no GT): stability and continuity of the mouth across
+  real episodes, on the test signers and on our existing PHOENIX/CSL reels.
+- **Speed:** FPS and ms/frame, encoder vs adapter.
+- CSV/JSON per run; `tools_temporal/aggregate_results.py` builds the table.
 
 ---
 
-## 6. Decisions taken (2026-10-02)
+## 7. When Track 1 counts as a success
+
+### 7.1 Better on occlusion without being worse elsewhere
+
+A model can do very well on synthetic occlusions by smoothing everything.
+Training succeeded only if, **at the same time**, on the test set:
+
+1. on occluded and near-occlusion frames, the error vs the unoccluded clip is
+   clearly lower than TEASER, SG9, interpolation **and** SmoothNet;
+2. on clean frames, the error vs TEASER stays small -- the mouthing has not
+   been erased;
+3. jitter and acceleration are lower than TEASER and at least comparable to
+   SG9.
+
+If only 1 holds, the result is aggressive smoothing, not a temporal model.
+
+### 7.2 A synthetic test set that is really new
+
+Otherwise it measures how well the model memorised the training hands:
+- **different signers** from training (4.2);
+- **different hands**: a held-out group of hand PNGs never used in training,
+  and test trajectories generated differently (replayed real hand motion);
+- **realistic durations and positions**: length, frequency and coverage of
+  the synthetic occlusions sampled from the real statistics (5.2) of PHOENIX
+  and CSL, including partial and long occlusions, not only short total ones.
+
+The test set is generated once with a fixed seed and stored
+(`tools_temporal/build_occlusion_testset.py`), so every method is scored on the
+same occlusions.
+
+---
+
+## 8. Ablations (`configs/temporal/`, `tools_temporal/run_ablations.sh`)
+
+Baselines and models:
+- **T0** TEASER per-frame
+- **T1** T0 + SG9
+- **T2** T0 + interpolation (current pipeline)
+- **T3** T0 + SmoothNet (same self-supervised recipe)
+- **T4** adapter, `residual`, `L_self` + `L_accel`
+- **T5** T4 + `gated` with `c_t`
+- **T6** T5 + mask token and frame masking
+- **T7** T6 + synthetic occlusion with `L_occ`
+
+Sweeps (on T7 unless stated):
+- `w_accel` (the main stability/fidelity trade-off; also on T4)
+- `occ_aug_p` 0.3 / 0.5 / 0.7 -- read together the occluded-frame error and
+  the clean-frame fidelity; higher p should help the first and cost a little
+  on the second, and the test set decides
+- window 8 / 16 / 32 frames (also the fps check: if 32 wins only on CSL at 30
+  fps, the window moves to seconds)
+- architecture transformer / tcn / gru; causal vs not
+- features `expr` vs `expr+pose`; `--self_target vertices | params`;
+  `--self_target_smoothed`
+- optional: `--occ_curriculum`, `--temporal_head full`
+
+Defaults: `--temporal_feats expr`, `gated`, transformer 2 layers d=256 (~1.5 M
+parameters, negligible next to the encoders).
+
+---
+
+## 9. Decisions
 
 | | question | decision |
 |---|---|---|
-| A | training data | Pixel3DMM on 300 PHOENIX train + 300 CSL train, ~75 % clean / 25 % real occlusion, chosen by `c_t`; first train A1 on 100+100 before scaling |
-| B | RGB2SMPLX integration | none until a winner; temporal output written to `teaser_temporal.npz` |
-| C | `L_accel` vs mouth distillation | `L_accel` against Pixel3DMM only; mouth distillation position-only against SG5-filtered TEASER-clean |
-| D | `--temporal_head` | `frozen` / `full`; no LoRA |
-| E | Pixel3DMM residual | weight 1 by default; dump tracker loss when re-running |
-| F | `replace` fusion | `alpha * f + T(f)`, `alpha` starts at 1, so identity at init |
-| G | GT for synthetic occlusion | same model on the clean clip (main), Pixel3DMM (secondary), Multiface real GT (headline) |
-| H | window / inference | window in frames, default 16; overlap-add (Hann, stride 4) default |
+| 1 | teacher | original frozen TEASER; no Pixel3DMM in Track 1 (2026-10-03) |
+| 2 | real occlusion in training | input only; every target loss x `(1 - c_t_real)`, 0 above a threshold |
+| 3 | `L_accel` | on the predicted vertices, towards zero, swept; kept honest by 7.1 |
+| 4 | data | several sign languages, signer-disjoint splits; frames + hands only |
+| 5 | GT for synthetic occlusion | TEASER on the unoccluded clip (main), same-model consistency (secondary) |
+| 6 | `--temporal_head` | `frozen` / `full`; no LoRA |
+| 7 | `replace` fusion | `alpha * f + T(f)`, `alpha` starts at 1 |
+| 8 | window / inference | in frames, default 16; overlap-add (Hann, stride 4) |
+| 9 | RGB2SMPLX | untouched until a winner; then `teaser_temporal.npz` |
 
 ---
 
-## 7. Tests -- `tests/temporal/`
+## 10. Track 2 (parked): better representation
 
-- split forward == `TeaserEncoder.forward` (bit for bit, CPU and GPU);
-- cache outputs == existing `teaser.npz` on a real clip (GPU, batch 1);
+Not part of Track 1; notes kept for later.
+- Pixel3DMM pseudo-GT (FLAME 2020, 100 expressions, gaze) exists for the 100
+  PHOENIX test clips and 49 Multiface clips; RGB2SMPLX's stage
+  `rgb2smplx/stages/pixel3dmm.py` writes it aligned to `frames/`. ~12 clips per
+  GPU-hour on PHOENIX.
+- TEASER's 50 expressions are the first 50 of the same FLAME 2020 basis, so a
+  Pixel3DMM target can be expressed as canonical vertices or refit to 50
+  coefficients by least squares.
+- Multiface (`multiface/mf50`) has real 3D GT: the right place to measure a
+  representation change.
+- SPECTRE's lipreading loss belongs here too (mouth detail), not in Track 1.
+
+---
+
+## 11. Tests -- `tests/temporal/`
+
+- split forward == `TeaserEncoder.forward` (bit for bit, CPU and CUDA);
+- cache outputs == RGB2SMPLX's `teaser.npz` on a real clip (GPU, batch 1);
 - adapter shapes for every arch/fusion; identity at init;
 - flag OFF unchanged (demo output before vs after);
-- losses finite; augmentation `c_t` consistent with the pasted mask.
+- losses finite; real-occlusion weighting zeroes the right frames;
+  augmentation `c_t` consistent with the pasted mask.
 
-GPU tests run on the debug queue (`boost_qos_dbg`, 30 min cap).
+No pytest in the TEASER env: tests are `unittest`. GPU tests run on the debug
+queue (`boost_qos_dbg`, 30 min cap).
 
 ---
 
-## 8. Commands
-
-(filled in as each component lands)
+## 12. Commands and progress
 
 ```bash
 TPY=/leonardo_work/IscrC_SLPSCALE/TEASER/.conda_envs/teaser/bin/python
 cd /leonardo_work/IscrC_SLPSCALE/TEASER_temporal
 export PYTHONPATH=.
 
-# unit tests (CPU part)
-$TPY -m pytest tests/temporal -q
+# unit tests (CPU, and CUDA when visible)
+$TPY -m unittest discover -s tests/temporal -p 'test_*.py' -v
 
-# 4.1 feature cache for one RGB2SMPLX work directory (batch 1 = identical to teaser.npz)
-$TPY tools_temporal/extract_features.py <work_dir> <out.npz> \
+# feature cache for one clip directory (batch 1 = identical to teaser.npz)
+$TPY tools_temporal/extract_features.py <clip_dir> <out.npz> \
     --checkpoint pretrained_models/TEASER.pt --temporal_feats expr
 
-# step 1 checks on a GPU (debug queue): unit tests + cache == RGB2SMPLX stage on a real clip
+# step 1 checks on a GPU (debug queue): unit tests + cache == RGB2SMPLX stage
 sbatch tools_temporal/sbatch/test_step1.sbatch          # CLIP=<work_dir> to change clip
-
-# clip lists for the Pixel3DMM train subsets (RGB2SMPLX env, reads the fits only)
-sbatch tools_temporal/sbatch/select_phoenix_train.sbatch
 ```
 
 Verified 2026-10-02 (job 59220919, A100): unit tests OK on CPU and CUDA; on
 `csl/test/S005996_P0006_T00` (105 frames) every `teaser.npz` key of the cache
 is identical to `rgb2smplx.stages.teaser --batch-size 1`.
 
----
-
-## 9. Progress
-
-- [x] Phase 0: exploration, plan, decisions (this file)
-- [x] 4.1 split encoder + identity test + feature cache (verified, see 8)
-- [ ] clip lists + Pixel3DMM sbatch for the train subsets (user launches) -- **blocked on frame access** (3)
-- [ ] 4.2 pseudo-GT, 4.3 `c_t`
-- [ ] 4.4 adapter, 4.5 losses, 4.7 training
-- [ ] 4.6 synthetic occlusion
-- [ ] 4.8 baselines, 4.9 evaluation, 5 ablations
+- [x] Phase 0 and plan (this file)
+- [x] 5.1 split encoder + identity test + feature cache
+- [ ] **training data access** (4.1) -- blocks training, not development
+- [ ] 5.2 `c_t_real` + occlusion statistics; signer splits (4.2)
+- [ ] 5.3 adapter, 5.5 losses
+- [ ] 5.4 synthetic occlusion + held-out test set (7.2)
+- [ ] 5.6 training, 5.8 baselines, 6 evaluation, 8 ablations
