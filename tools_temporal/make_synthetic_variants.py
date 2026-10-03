@@ -14,7 +14,7 @@ occlusion), plus:
 
 ``c_syn`` (T, 2)   synthetic coverage [mouth, eyes] from the pasted alpha
 ``syn_mask`` (T,)  frames with a pasted hand
-``plan``           the episodes, JSON
+``plan``           the episodes, JSON (inside the clip's clean segments with ``--segments``)
 ``clean_cache``    the clean cache's file name: the training target (TEASER on
                    the unoccluded frames) and the clean landmarks come from it.
 
@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--hand_list", type=Path, help="names of the hand PNGs to use (train or test identities)")
     parser.add_argument("--stats", type=Path, help="occlusion_stats.py JSON (default: geometric, mean 4.3 frames)")
     parser.add_argument("--variants", type=int, default=3)
+    parser.add_argument("--segments", type=Path, help="segments.json of select_clean_clips.py: paste only "
+                                                      "inside each clip's clean segments")
     parser.add_argument("--names", type=Path, help="clip names (default: every clean cache)")
     parser.add_argument("--checkpoint", type=Path, default=REPO_ROOT / "pretrained_models/TEASER.pt")
     parser.add_argument("--temporal_feats", choices=("expr", "expr+pose"), default="expr+pose")
@@ -56,6 +58,7 @@ def main():
     hand_list = args.hand_list.resolve() if args.hand_list else None
     stats_path = args.stats.resolve() if args.stats else None
     names_path = args.names.resolve() if args.names else None
+    segments = json.loads(args.segments.read_text()) if args.segments else {}
     checkpoint = args.checkpoint.resolve()
     os.chdir(REPO_ROOT)
     sys.path.insert(0, str(REPO_ROOT))
@@ -85,7 +88,7 @@ def main():
                 continue
             started = time.time()
             rng = np.random.default_rng([args.seed, k, zlib.crc32(name.encode())])
-            plan = oa.sample_plan(len(frames), stats, bank.names, rng)
+            plan = oa.sample_plan(len(frames), stats, bank.names, rng, segments=segments.get(name))
             occluder = oa.Occluder(frames, landmarks, plan, bank)
             arrays = extract_clip(clips_root / name, encoder, device, args.temporal_feats,
                                   frames=occluder, progress=False)

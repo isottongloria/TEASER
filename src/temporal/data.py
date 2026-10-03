@@ -54,7 +54,10 @@ def _params(cache):
 class Clip:
     """A clean clip: what the model sees and the target are the same frames."""
 
-    def __init__(self, cache_path, occ_path=None, feature_set="expr", teacher_smoothing=None):
+    def __init__(self, cache_path, occ_path=None, feature_set="expr", teacher_smoothing=None, segments=None):
+        # Clean segments ([[start, end_exclusive], ...], select_clean_clips.py): training
+        # windows are drawn only inside them. None = the whole clip.
+        self.segments = [tuple(x) for x in segments] if segments is not None else None
         with np.load(cache_path) as cache:
             self.feats = _features(cache, feature_set, cache_path)
             self.input_params = _params(cache)
@@ -123,9 +126,13 @@ class VariantClip(Clip):
         self.fps = clean.fps
         self.name = Path(variant_path).name[:-4]
         self.clean = clean
+        self.segments = clean.segments
 
 
-def load_clips(names, cache_dir, occ_dir=None, feature_set="expr", teacher_smoothing=None):
+def load_clips(names, cache_dir, occ_dir=None, feature_set="expr", teacher_smoothing=None, segments=None):
+    """``segments``: dict clip -> clean segments, or a path to select_clean_clips.py's segments.json."""
+    if isinstance(segments, (str, Path)):
+        segments = json.loads(Path(segments).read_text())
     clips = []
     for name in names:
         cache = Path(cache_dir) / f"{name}.npz"
@@ -133,7 +140,8 @@ def load_clips(names, cache_dir, occ_dir=None, feature_set="expr", teacher_smoot
             warnings.warn(f"no cache for {name}, skipped")
             continue
         occ = Path(occ_dir) / f"{name}.occ.npz" if occ_dir else None
-        clips.append(Clip(cache, occ, feature_set, teacher_smoothing))
+        clips.append(Clip(cache, occ, feature_set, teacher_smoothing,
+                          segments.get(name) if segments else None))
     return clips
 
 
@@ -146,7 +154,7 @@ def load_variants(clips, variant_dir, feature_set="expr"):
 
 
 class WindowDataset(Dataset):
-    """Random windows. With probability ``occ_aug_p`` a window comes from a synthetic
+    """Random windows, inside each clip's clean segments when it has them. With probability ``occ_aug_p`` a window comes from a synthetic
     variant, placed so that one of its episodes lies inside with context on both
     sides when the window allows it; otherwise from a clean clip. Clips are drawn
     proportionally to their length."""
@@ -157,7 +165,8 @@ class WindowDataset(Dataset):
         self.clips, self.variants = clips, [v for v in variants if v.episodes]
         self.window, self.samples, self.seed = window, samples_per_epoch, seed
         self.occ_aug_p = occ_aug_p if self.variants else 0.0
-        lengths = np.array([len(c) for c in clips], dtype=np.float64)
+        lengths = np.array([sum(e - s for s, e in c.segments) if c.segments else len(c) for c in clips],
+                           dtype=np.float64)
         self.p = lengths / lengths.sum()
         self.epoch = 0
 
@@ -174,8 +183,17 @@ class WindowDataset(Dataset):
             start = int(np.clip(ep["start"] - lead, 0, max(0, len(clip) - self.window)))
         else:
             clip = self.clips[rng.choice(len(self.clips), p=self.p)]
-            start = int(rng.integers(0, max(1, len(clip) - self.window + 1)))
+            start = _clean_start(clip, self.window, rng)
         return clip.window(start, self.window)
+
+
+def _clean_start(clip, window, rng):
+    """A window start inside one of the clip's clean segments (whole clip when it has none)."""
+    if not clip.segments:
+        return int(rng.integers(0, max(1, len(clip) - window + 1)))
+    lengths = np.array([max(1, e - s - window + 1) for s, e in clip.segments], dtype=np.float64)
+    seg_start, seg_end = clip.segments[rng.choice(len(lengths), p=lengths / lengths.sum())]
+    return int(seg_start + rng.integers(0, max(1, seg_end - seg_start - window + 1)))
 
 
 def full_clip(clip):

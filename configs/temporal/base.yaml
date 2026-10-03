@@ -15,6 +15,7 @@ data:
   val_list: ???
   feature_set: expr       # expr | expr+pose
   teacher_smoothing: null # null | sg9  (--self_target_smoothed)
+  segments: null          # segments.json of select_clean_clips.py: train only on clean segments
 
 model:
   kind: adapter           # adapter | smoothnet (T3)

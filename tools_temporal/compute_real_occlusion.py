@@ -75,7 +75,7 @@ def flame_region_ids_in_smplx():
     return {"mouth": flame_to_smplx[regions["mouth"]], "eyes": flame_to_smplx[regions["eyes"]]}
 
 
-def clip_occlusion(fit_path, geometry, extra_regions):
+def clip_occlusion(fit_path, geometry, extra_regions, fps=None):
     npz = dict(np.load(fit_path))
     vertices = geometry.forward_vertices(npz)
     projected = geometry.project_all_frames(vertices, npz)
@@ -101,7 +101,7 @@ def clip_occlusion(fit_path, geometry, extra_regions):
         teaser_jaw=np.asarray(npz["smplx_jaw_pose"], np.float32),
         teaser_eyelid=np.asarray(npz.get("smplx_eyelid", np.zeros((n, 2))), np.float32),
         frame_shape=np.asarray(frame_shape),
-        fps=np.float32(geometry.DEFAULT_FPS),
+        fps=np.float32(fps if fps else geometry.DEFAULT_FPS),
     )
     return out
 
@@ -113,6 +113,7 @@ def main():
     parser.add_argument("--clips", type=Path, help="file of clip names (default: every clip with a fit)")
     parser.add_argument("--fit-name", default=FIT_NAME)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--fps", type=float, help="clip frame rate to record (default 25)")
     args = parser.parse_args()
 
     sys.path.insert(0, str(RGB2SMPLX / "experiments/occlusion_protocols_smplx"))
@@ -130,7 +131,7 @@ def main():
         if target.is_file() and not args.overwrite:
             continue
         try:
-            arrays = clip_occlusion(args.fits / name / args.fit_name, geometry, extra)
+            arrays = clip_occlusion(args.fits / name / args.fit_name, geometry, extra, args.fps)
         except Exception as error:
             print(f"[occlusion] FAILED {name}: {error}", file=sys.stderr)
             failed += 1

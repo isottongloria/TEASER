@@ -12,3 +12,6 @@ pretrained_models/
 .pip_cache/
 .cache/
 datasets/preprocess_scripts/landmark.onnx
+
+# Temporal TEASER data (TEMPORAL_README.md 4)
+data/temporal/

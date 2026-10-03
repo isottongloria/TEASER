@@ -152,28 +152,37 @@ class OcclusionStats:
         return float(np.clip(rng.choice(self.coverages) + rng.normal(0, 0.05), 0.2, 1.0))
 
 
-def sample_plan(n_frames, stats, hand_names, rng, gap=(8, 24), max_len=20, eyes_fraction=None):
-    """Episodes over a clip, separated by ``gap`` frames, leaving context at both ends."""
+def sample_plan(n_frames, stats, hand_names, rng, gap=(8, 24), max_len=20, eyes_fraction=None,
+                segments=None, context=3):
+    """Episodes separated by ``gap`` frames, each with at least ``context`` visible frames on both sides.
+
+    ``segments`` ([[start, end_exclusive], ...]): the clip's clean segments
+    (tools_temporal/select_clean_clips.py); episodes, with their context, are
+    placed only inside them, so every pasted frame has a clean target. Default:
+    the whole clip.
+    """
     eyes_fraction = stats.eyes_fraction if eyes_fraction is None else eyes_fraction
-    episodes, t = [], int(rng.integers(3, max(4, gap[0])))
-    while True:
-        length = stats.duration(rng, max_len)
-        if t + length + 2 > n_frames:
-            break
-        angle = rng.uniform(0, 2 * np.pi)
-        episodes.append({
-            "start": t, "length": length,
-            "region": "eyes" if rng.random() < eyes_fraction else "mouth",
-            "coverage": stats.coverage(rng),
-            "hand": str(rng.choice(hand_names)),
-            "scale": float(rng.uniform(1.8, 2.8)),      # hand height / inter-ocular distance
-            "rotation": float(rng.uniform(-50, 50)),
-            "flip": bool(rng.random() < 0.5),
-            "direction": [float(np.cos(angle)), float(np.sin(angle))],
-            "drift": float(rng.uniform(0.0, 0.4)),       # path length / hand size across the episode
-            "seed": int(rng.integers(0, 2 ** 31)),
-        })
-        t += length + int(rng.integers(gap[0], gap[1] + 1))
+    episodes = []
+    for seg_start, seg_end in (segments if segments is not None else [(0, n_frames)]):
+        t = seg_start + context + int(rng.integers(0, max(1, gap[0] - context)))
+        while True:
+            length = stats.duration(rng, max_len)
+            if t + length + context > seg_end:
+                break
+            angle = rng.uniform(0, 2 * np.pi)
+            episodes.append({
+                "start": int(t), "length": int(length),
+                "region": "eyes" if rng.random() < eyes_fraction else "mouth",
+                "coverage": stats.coverage(rng),
+                "hand": str(rng.choice(hand_names)),
+                "scale": float(rng.uniform(1.8, 2.8)),      # hand height / inter-ocular distance
+                "rotation": float(rng.uniform(-50, 50)),
+                "flip": bool(rng.random() < 0.5),
+                "direction": [float(np.cos(angle)), float(np.sin(angle))],
+                "drift": float(rng.uniform(0.0, 0.4)),       # path length / hand size across the episode
+                "seed": int(rng.integers(0, 2 ** 31)),
+            })
+            t += length + int(rng.integers(gap[0], gap[1] + 1))
     return episodes
 
 

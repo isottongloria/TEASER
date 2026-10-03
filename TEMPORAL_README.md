@@ -150,48 +150,67 @@ occlusion and hand masks come from the existing fits. How2Sign needs the full
 pipeline first (no fit = no occlusion meter, no hand masks); it joins in round
 two.
 
-### 4.2 Pilot dataset: 300 clips
+### 4.2 Pilot dataset: 100 + 100 + 100 training clips
 
-Built in this order, so that frames and TEASER are extracted only for the
-clips that are kept:
+**Training uses clean video only.** Every occlusion the model learns from is
+synthetic, pasted by us on clean frames, so every occluded frame has a true
+unoccluded target. Real occlusion is measured only to throw it away, to size
+the synthetic occlusions (4.3) and for the real-world test.
 
-1. **Candidate pool** per corpus, from the training signers only (4.2b):
-   ~1000 clips each, random, seeded.
-2. **Occlusion meter on the fits** (`compute_real_occlusion.py`, method (a):
-   SMPL-X hands and face from the fit, projected with the fit's camera, the
-   RGB2SMPLX occlusion protocol). Needs no frames.
-3. **Keep the clean ones.** A clip is kept when: occluded frames
-   (`c_mnc > 0.2`) <= 5 %, no episode longer than 15 frames, and at least 3
-   clean 16-frame windows (every frame with `c_mnc < 0.05` and at least 2
-   frames from any real episode, whose neighbours are already corrupted).
-   The synthetic occlusions are pasted on those clean windows, so each pasted
-   frame has a true unoccluded target. The rejected fraction is reported per
-   corpus.
-4. **Pick 300**: 150 PHOENIX + 150 CSL-Daily (How2Sign in round two), at most
-   ~15 clips per signer, seeded.
-5. **Frames**: PHOENIX already there; CSL-Daily regenerated from the source
-   video with RGB2SMPLX's `prepare --target-fps 30`, checked against the fit
-   (same frame count; our TEASER expression vs the fit's `smplx_expr50`).
-6. **TEASER feature cache**, the real-occlusion file, the valid-target mask.
-7. **Hand bank** (5.4) from the same clips; **synthetic variants** (3 per clip).
+Data live in `data/temporal/<corpus>/` (git-ignored): `lists/` (candidates,
+splits, `segments.json`, reports), `occ/`, `clips/` (frames), `cache/`,
+`variants/`.
+
+1. **Candidates**: CSL-Daily 150 per extracted signer (1050); PHOENIX 1500
+   at random over train/dev/test (signers from the corpus CSVs).
+2. **Occlusion meter (a) on the fits** (`compute_real_occlusion.py`): no
+   frames needed.
+3. **Selection** (`select_clean_clips.py`): a clip is eligible when <= 5 % of
+   its frames are occluded (`c_mnc > 0.2`), no episode is longer than 15
+   frames, and its **clean segments** hold >= 48 frames. Clean segment = a run
+   of >= 24 frames with `c_mnc < 0.05`, at least 2 frames from any real
+   episode. Training windows and synthetic hands stay inside the clean
+   segments (`data.segments`, `make_synthetic_variants.py --segments`).
+4. **Pick** per split, round-robin over signers, at most 30 per signer.
+5. **Frames**: PHOENIX linked; CSL-Daily regenerated with RGB2SMPLX's
+   `prepare --target-fps 30` and checked against the fit's frame count.
+6. **TEASER cache** (expr+pose, batch 1), hand bank, 3 synthetic variants.
+
+Selection, 2026-10-03:
+
+| corpus | candidates | too much real occlusion | not enough clean frames | eligible | train | val | test |
+|---|---|---|---|---|---|---|---|
+| PHOENIX | 1500 (13 without a readable fit) | 872 | 133 | 482 | 100 clips, 9027 clean frames | 20 (Signer07) | 30 (Signer04, 08) |
+| CSL-Daily | 1050 | 547 | 17 | 486 | 100 clips, 14001 clean frames | 20 (P0001) | 30 (P0005, P0007) |
+| How2Sign | pending (4.2d) | | | | 100 | | |
+
+PHOENIX train per signer: Signer01 29, 03 28, 05 28, 09 14, 02 1 (Signer06:
+no eligible clip). CSL-Daily train: 25 each for P0000, P0002, P0004, P0008.
 
 ### 4.2b Splits
 
-- CSL-Daily: the extracted signers are used for train / val; **P0003, P0006,
-  P0009 never appear in the extracted 40 %** and are the test signers, through
-  our own `csl/test` clips (frames and fits readable). Validation: one
-  extracted signer (P0001, the smallest).
-- PHOENIX: 2 test signers and 1 validation signer held out across train, dev
-  and test (chosen from the clip counts), the rest for training.
-- Splits are written once to `configs/temporal/splits/` and never changed.
+- PHOENIX: test Signer04 + Signer08, validation Signer07, training the rest
+  (signers span the official train/dev/test, so clips are drawn from all three).
+- CSL-Daily: test P0005 + P0007, validation P0001, training P0000, P0002,
+  P0004, P0008. (Our older `csl/test` clips were prepared at 15 fps and the
+  three signers missing from the extracted 40 % have no 30 fps fit, so the
+  test signers come from the extracted ones.)
+- How2Sign: by signer once the signer of each video is known (4.2d).
+- Lists: `data/temporal/<corpus>/lists/{train,val,test}.txt`; never changed.
 - Our existing evaluation sets (the 100 PHOENIX test clips, the CSL test
-  reel) are kept as an extra *real-occlusion* check; never trained on.
+  reel) are kept as an extra real-occlusion check.
 
 ### 4.2c Valid targets
 
-Per frame, `target_valid` = `c_mnc < 0.05` and face detected and at least 2
-frames from any real episode (`c_mnc > 0.2`). Target losses use it on top of
-the soft `(1 - c_real)` weight. Clean windows = 16 consecutive valid frames.
+Inside clean segments every frame is a valid target by construction. Real
+occlusion outside them never enters training.
+
+### 4.2d How2Sign (ASL)
+
+Raw videos are long (2-3 min, 1280x720, 24 or 30 fps), so they are cut into
+chunks, go through the full RGB2SMPLX pipeline (needed for meter (a) and the
+hand masks), then the same selection. GPU budget: 2 hours, up to 4 GPUs in
+parallel.
 
 ### 4.3 How long real occlusions are
 

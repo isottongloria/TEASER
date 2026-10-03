@@ -165,7 +165,8 @@ def main():
     OmegaConf.save(cfg, out_dir / "config.yaml")
 
     dc = cfg.data
-    train_clips = load_clips(read_list(dc.train_list), dc.cache_dir, dc.occ_dir, dc.feature_set, dc.teacher_smoothing)
+    train_clips = load_clips(read_list(dc.train_list), dc.cache_dir, dc.occ_dir, dc.feature_set, dc.teacher_smoothing,
+                             dc.get("segments"))
     val_clips = load_clips(read_list(dc.val_list), dc.cache_dir, dc.occ_dir, dc.feature_set, dc.teacher_smoothing)
     train_variants = load_variants(train_clips, dc.variant_dir, dc.feature_set) if dc.variant_dir else []
     val_variants = load_variants(val_clips, dc.variant_dir, dc.feature_set) if dc.variant_dir else []
