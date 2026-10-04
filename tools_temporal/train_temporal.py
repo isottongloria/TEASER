@@ -221,8 +221,10 @@ def main():
     initial = evaluate(model, val_clips, val_variants, flame, REGIONS, cfg, device, with_baseline=True)
     log.write(json.dumps({"step": 0, "val": initial}) + "\n")
     log.flush()
-    best = val_score(initial)
-    print(f"[train] step 0 (= TEASER) val score {best:.4f}")
+    # best.pt is the best *trained* checkpoint: step 0 is TEASER itself and only logged
+    # (a model that never beats TEASER's score must still leave its best checkpoint).
+    best = float("inf")
+    print(f"[train] step 0 (= TEASER) val score {val_score(initial):.4f}")
 
     rng = np.random.default_rng(cfg.seed)
     started, running = time.time(), {}
