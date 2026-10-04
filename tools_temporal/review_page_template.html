@@ -69,6 +69,11 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
     </div>
   </section>
 
+  <section style="display:grid;gap:10px" id="evals_section" hidden>
+    <h2>Comparisons</h2>
+    <div id="evals" style="display:grid;gap:16px"></div>
+  </section>
+
   <section style="display:grid;gap:10px" id="results_section" hidden>
     <h2>Model outputs on training clips</h2>
     <p class="muted">The face each method reconstructs, rendered from the front with the clip's mean identity and the head pose removed, so only expression, jaw and eyelids differ. <b>Synthetic</b>: a pasted hand on a clean clip, with the target (TEASER on the frame without the hand). <b>Real</b>: a real hand over the mouth in a training clip; those frames are outside the clean segments, were never a training target, and have no ground truth. The curve is the mouth opening (vertical extent of the lips) over a longer stretch; shaded: hand over the face.</p>
@@ -283,6 +288,33 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
       });
       document.getElementById("run_corpus").innerHTML = tc + "</tbody>";
     }
+  }
+
+  const EVALS = R._evals || [];
+  if (EVALS.length) {
+    document.getElementById("evals_section").hidden = false;
+    const rowsE = [["synthetic", "occluded", "err_mouth", "Mouth error, occluded frames (fake hands)"],
+      ["synthetic", "near", "err_mouth", "Mouth error, frames next to the occlusion"],
+      ["real", "clean", "err_face", "Face drift from TEASER, clean real frames"],
+      ["real", "clean", "err_mouth", "Mouth drift from TEASER, clean real frames"],
+      ["real", "clean", "jerk", "Jerk, clean real frames (jitter)"],
+      ["real", "near", "jerk", "Jerk, frames next to real occlusions"]];
+    document.getElementById("evals").innerHTML = EVALS.map(ev => {
+      const E = ev.data, names = Object.keys(E).filter(k => !k.startsWith("_"));
+      let h = `<thead><tr><th>mm (validation)</th>${names.map(n => `<th>${n}</th>`).join("")}</tr></thead><tbody>`;
+      rowsE.forEach(([k, g, m, l]) => {
+        const vals = names.map(n => ((E[n][k] || {})[g] || {})[m]);
+        const ok = vals.filter(v => v != null && !isNaN(v)), lo = Math.min(...ok);
+        h += `<tr><td>${l}</td>${vals.map(v => `<td>${v == null || isNaN(v) ? "–" : (v === lo ? `<b>${v.toFixed(3)}</b>` : v.toFixed(3))}</td>`).join("")}</tr>`;
+      });
+      const chk = E._success || {};
+      const pass = n => { const c = chk[n]; if (!c) return "–";
+        const ok1 = c["1_occluded_beats_baselines"] && c["1_near_beats_baselines"];
+        const ok3 = c["3_jerk_vs_sg9"] <= 1.05;
+        return `${ok1 ? "✓" : "✗"} occl. · ${(c["2_clean_fidelity_mm"]).toFixed(2)} mm · ${ok3 ? "✓" : "✗"} jitter (${c["3_jerk_vs_sg9"].toFixed(2)}× SG9)`; };
+      h += `<tr><td>Success criteria (7.1)</td>${names.map(n => `<td><small>${pass(n)}</small></td>`).join("")}</tr>`;
+      return `<div class="box" style="display:grid;gap:8px"><h3>${ev.title}</h3>${ev.desc ? `<p class="muted">${ev.desc}</p>` : ""}<div class="scroll"><table class="t">${h}</tbody></table></div></div>`;
+    }).join("");
   }
 
   const RES = R._results;

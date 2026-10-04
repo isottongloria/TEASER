@@ -67,7 +67,8 @@ def main():
     parser.add_argument("--occ", type=Path)
     parser.add_argument("--variants", type=Path)
     parser.add_argument("--list", type=Path, required=True)
-    parser.add_argument("--method", action="append", default=[], help="NAME=teaser|sg9|sg9+interp|<ckpt.pt>")
+    parser.add_argument("--method", action="append", default=[],
+                        help="NAME=teaser|sg9|sg9+interp|<ckpt.pt>|<ckpt.pt>+sg9")
     parser.add_argument("--external", action="append", default=[], help="NAME=<dir of <clip>.npz>")
     parser.add_argument("--near_k", type=int, default=3)
     parser.add_argument("--out", type=Path, required=True)
@@ -76,7 +77,14 @@ def main():
     paths = {k: (v.resolve() if v else None) for k, v in vars(args).items()
              if k in ("cache", "occ", "variants", "list", "out")}
     methods = [m.split("=", 1) for m in args.method]
-    methods = [(n, v if v in ("teaser", "sg9", "sg9+interp") else str(Path(v).resolve())) for n, v in methods]
+    def resolve(v):
+        # "<ckpt.pt>+sg9": the model's output, then SG9 (stability of SG9 on top of the model).
+        if v in ("teaser", "sg9", "sg9+interp"):
+            return v
+        if v.endswith("+sg9"):
+            return str(Path(v[:-4]).resolve()) + "+sg9"
+        return str(Path(v).resolve())
+    methods = [(n, resolve(v)) for n, v in methods]
     externals = [(n, Path(v).resolve()) for n, v in (e.split("=", 1) for e in args.external)]
     os.chdir(REPO_ROOT)
     sys.path.insert(0, str(REPO_ROOT))
@@ -94,8 +102,9 @@ def main():
 
     models = {}
     for name, spec in methods:
-        if spec.endswith(".pt"):
-            models[name] = load_checkpoint(spec, device)
+        if spec.endswith(".pt") or spec.endswith(".pt+sg9"):
+            models[name] = load_checkpoint(spec.removesuffix("+sg9") if hasattr(str, "removesuffix")
+                                           else spec[:-4] if spec.endswith("+sg9") else spec, device)
 
     report = {}
     for name, spec in methods + [(n, f"external:{d}") for n, d in externals]:
@@ -118,6 +127,9 @@ def main():
                     seconds += time.time() - t0
                     frames += len(clip)
                     pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
+                    if spec.endswith("+sg9"):
+                        from src.temporal.postproc import savgol
+                        pred = {k: savgol(v, 9, 2) for k, v in pred.items()}
                 elif spec.startswith("external:"):
                     ext_name = clip.name if kind == "real" else clip.name  # variants: <clip>.v<k>.npz
                     with np.load(Path(spec[len("external:"):]) / f"{ext_name}.npz") as ext:
@@ -132,7 +144,7 @@ def main():
                 results[kind].append(M.clip_metrics(M.canonical_mm(flame, pred, device),
                                                     M.canonical_mm(flame, clip.teacher, device), groups,
                                                     region_index, clip.episodes if kind == "synthetic" else None))
-        kind_of = models[name][1].model.get("kind", "adapter") if name in models else \
+        kind_of = (models[name][1].model.get("kind", "adapter") + ("+sg9" if spec.endswith("+sg9") else "")) if name in models else \
             ("external" if spec.startswith("external:") else "postproc")
         report[name] = {"spec": spec, "kind": kind_of, **{k: M.pool(v) for k, v in results.items() if v}}
         if frames:
@@ -155,7 +167,7 @@ def success_checks(report):
     sg9 = next((n for n in report if report[n]["spec"] == "sg9"), None)
     out = {}
     for name, entry in report.items():
-        if entry["kind"] != "adapter":
+        if not entry["kind"].startswith("adapter"):
             continue
         checks = {}
         for group in ("occluded", "near"):

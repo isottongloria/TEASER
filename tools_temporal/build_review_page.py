@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--notes", type=Path)
     parser.add_argument("--run", type=Path, help="a training run directory (summary.json, eval_val.json)")
     parser.add_argument("--results", type=Path, help="render_results.py output")
+    parser.add_argument("--eval", action="append", default=[],
+                        help="TITLE=path/to/eval_temporal.json[:DESCRIPTION], shown as comparison tables in order")
     args = parser.parse_args()
     report = json.loads(args.report.read_text())
     report["_stamp"] = f"Built {datetime.datetime.now():%Y-%m-%d %H:%M} from {args.report.name}"
@@ -39,6 +41,11 @@ def main():
                 if entry.get("step") == best and "val" in entry:
                     run["by_corpus"] = entry["val"].get("by_corpus")
         report["_run"] = run
+    report["_evals"] = []
+    for spec in args.eval:
+        title, rest = spec.split("=", 1)
+        path, _, desc = rest.partition(":")
+        report["_evals"].append({"title": title, "desc": desc, "data": json.loads(Path(path).read_text())})
     if args.results and args.results.is_file():
         report["_results"] = json.loads(args.results.read_text())
     data = json.dumps(report).replace("</", "<\\/")
