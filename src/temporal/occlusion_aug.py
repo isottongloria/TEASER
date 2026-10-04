@@ -88,6 +88,12 @@ class FaceRegions:
         """Width of the eye region (about the outer eye corners' distance)."""
         return max(float(np.ptp(self.eyes[t][:, 0])), 4.0)
 
+    def eye_angle(self, t):
+        """Angle of the eye region's principal axis (degrees, folded to [-90, 90))."""
+        pts = self.eyes[t] - self.eyes[t].mean(0)
+        _, _, vt = np.linalg.svd(pts, full_matrices=False)
+        return (float(np.degrees(np.arctan2(vt[0, 1], vt[0, 0]))) + 90) % 180 - 90
+
     def skin_mask(self, t, shape):
         """Cheeks / nose: the hull of mouth + eyes minus both regions."""
         mask = np.zeros(shape, np.uint8)
@@ -230,6 +236,98 @@ def sample_plan(n_frames, stats, hand_names, rng, gap=(8, 24), max_len=20, eyes_
     return episodes
 
 
+def load_replay_bank(path):
+    """Episodes of tools_temporal/build_replay_bank.py (one JSON per line)."""
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def load_hand_index(index_tsv, names):
+    """{name: (side, pose (45,))} for the bank hands in ``names`` (build_hand_bank.py's index.tsv)."""
+    keep, out = set(names), {}
+    for line in Path(index_tsv).read_text().splitlines():
+        cols = line.split("\t")
+        name = cols[0][:-4]
+        if name in keep:
+            out[name] = (cols[6], np.array([float(x) for x in cols[10:]], np.float32))
+    return out
+
+
+def sample_replay_plan(n_frames, replay, hand_index, rng, gap=(8, 24), segments=None, top_k=5):
+    """Real occlusion episodes (their dynamics), replayed inside the clean segments.
+
+    Each source episode keeps its own length, approach and retreat; the hand is a
+    bank cut-out of the same side with one of the ``top_k`` nearest MANO poses
+    (mirrored when only the other side exists).
+    """
+    names = list(hand_index)
+    sides = np.array([hand_index[n][0] for n in names])
+    poses = np.stack([hand_index[n][1] for n in names])
+    episodes = []
+    for seg_start, seg_end in (segments if segments is not None else [(0, n_frames)]):
+        t = seg_start + int(rng.integers(0, max(1, gap[0] // 2)))
+        for _ in range(1000):
+            src = replay[int(rng.integers(len(replay)))]
+            span = len(src["frames"])
+            if t + span > seg_end:
+                fits = [r for r in replay if t + len(r["frames"]) <= seg_end]
+                if not fits:
+                    break
+                src = fits[int(rng.integers(len(fits)))]
+                span = len(src["frames"])
+            same = sides == src["side"]
+            pool = np.where(same)[0] if same.any() else np.arange(len(names))
+            dist = np.linalg.norm(poses[pool] - np.array(src["pose"], np.float32), axis=1)
+            pick = pool[np.argsort(dist)[:top_k]]
+            hand = names[int(rng.choice(pick))]
+            entry, length = src["core_start"], src["length"]
+            episodes.append({
+                "type": "replay", "start": int(t + entry), "length": int(length), "entry": int(entry),
+                "exit": int(span - entry - length), "region": "mouth",
+                "coverage": float(max(f["c_mouth"] for f in src["frames"])),
+                "hand": hand, "flip": bool(hand_index[hand][0] != src["side"]),
+                "source": f"{src['clip']}:{src['window'][0]}-{src['window'][1]}",
+                "frames": src["frames"], "seed": int(rng.integers(0, 2 ** 31)),
+            })
+            t += span + int(rng.integers(gap[0], gap[1] + 1))
+    return episodes
+
+
+def hand_direction(alpha):
+    """Forearm-to-hand direction of a cut-out (degrees, image coordinates): from its
+    faded forearm stub to its opaque hand; principal axis as a fallback."""
+    ys, xs = np.nonzero(alpha > 0.9)
+    yp, xp = np.nonzero((alpha > 0.08) & (alpha < 0.6))
+    if len(xs) >= 5 and len(xp) >= 5:
+        v = np.array([xs.mean() - xp.mean(), ys.mean() - yp.mean()])
+        if np.linalg.norm(v) > 1e-3:
+            return float(np.degrees(np.arctan2(v[1], v[0])))
+    ys, xs = np.nonzero(alpha > 0.5)
+    if len(xs) < 2:
+        return 0.0
+    pts = np.stack([xs, ys], 1).astype(np.float64)
+    _, _, vt = np.linalg.svd(pts - pts.mean(0), full_matrices=False)
+    return float(np.degrees(np.arctan2(vt[0, 1], vt[0, 0])))
+
+
+def _rotate(v, degrees):
+    a = np.radians(degrees)
+    c, s = np.cos(a), np.sin(a)
+    return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1]])
+
+
+def _motion_blur(img, velocity, length):
+    if length < 1.5:
+        return img
+    k = int(np.ceil(length)) | 1
+    kernel = np.zeros((k, k), np.float32)
+    direction = velocity / (np.linalg.norm(velocity) + 1e-9)
+    c = k // 2
+    for s in np.linspace(-c, c, 2 * k):
+        x, y = int(round(c + s * direction[0])), int(round(c + s * direction[1]))
+        kernel[y, x] = 1.0
+    return cv2.filter2D(img, -1, kernel / kernel.sum())
+
+
 # ---------------------------------------------------------------- applying
 
 
@@ -318,6 +416,68 @@ class Occluder:
         self._offset[key] = (lo, height)
         return self._offset[key]
 
+    def _replay_patch(self, ep, rec, face_size, eye_angle, velocity):
+        """The bank hand scaled, turned and blurred as the replayed frame says."""
+        base = self.bank.get(ep["hand"])
+        if ep["flip"]:
+            base = base[:, ::-1].copy()
+        key = (ep["hand"], ep["flip"])
+        if key not in self._patch_cache:
+            a = base[..., 3].astype(np.float32) / 255.0
+            ys, xs = np.nonzero(a > 0.5)
+            extent = max(float(np.ptp(xs)) if len(xs) else 1.0, float(np.ptp(ys)) if len(ys) else 1.0, 1.0)
+            self._patch_cache[key] = (hand_direction(a), extent)
+        direction, extent = self._patch_cache[key]
+        height = max(8.0, rec["height"] * face_size)
+        scale = height / extent
+        patch = cv2.resize(base, (max(2, int(base.shape[1] * scale)), max(2, int(base.shape[0] * scale))),
+                           interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+        side = int(np.hypot(*patch.shape[:2])) + 2
+        canvas = np.zeros((side, side, 4), np.uint8)
+        y0, x0 = (side - patch.shape[0]) // 2, (side - patch.shape[1]) // 2
+        canvas[y0:y0 + patch.shape[0], x0:x0 + patch.shape[1]] = patch
+        turn = (rec["angle"] + eye_angle) - direction           # image coordinates, y down
+        rot = cv2.getRotationMatrix2D((side / 2, side / 2), -turn, 1.0)
+        canvas = cv2.warpAffine(canvas, rot, (side, side), flags=cv2.INTER_LINEAR)
+        speed = float(np.linalg.norm(velocity))
+        canvas = _motion_blur(canvas, velocity, min(0.6 * speed, 0.3 * height))
+        alpha = cv2.GaussianBlur(canvas[..., 3].astype(np.float32), (0, 0), max(0.6, 0.012 * height)) / 255.0
+        ys, xs = np.nonzero(alpha > 0.9)
+        mass = np.array([xs.mean() - side / 2, ys.mean() - side / 2]) if len(xs) else np.zeros(2)
+        return canvas[..., :3].copy(), alpha, height, mass
+
+    def _replay_centre(self, ep, j, t):
+        rec = ep["frames"][j]
+        size = self.regions.face_size(t)
+        return self.regions.centre(t, "mouth") + _rotate(np.array(rec["rel"]) * size, self.regions.eye_angle(t))
+
+    def _place_replay(self, k, t, shape):
+        ep = self.plan[k]
+        first = ep["start"] - ep["entry"]
+        j = t - first
+        rec = ep["frames"][j]
+        centre = self._replay_centre(ep, j, t)
+        prev = self._replay_centre(ep, j - 1, t - 1) if j > 0 and t > 0 else centre
+        colour, alpha, height, mass = self._replay_patch(ep, rec, self.regions.face_size(t),
+                                                         self.regions.eye_angle(t), centre - prev)
+        target = rec["c_mouth"]
+        if target > 0.2:
+            # Same coverage curve as the source: slide the hand along the line from the
+            # lips centre through its replayed position until the coverage matches.
+            lips = self.regions.centre(t, "mouth")
+            hull = self.regions.hulls(t)["mouth"]
+            u = centre - lips
+            dist = float(np.linalg.norm(u))
+            u = u / dist if dist > 1e-3 else np.array([0.0, 1.0])
+            cov = lambda d: coverage(self._alpha_at(alpha, lips + u * d, shape, mass)[0], hull)
+            lo, hi = 0.0, max(dist * 2.0, height)
+            if cov(lo) >= target:
+                for _ in range(12):
+                    mid = (lo + hi) / 2
+                    lo, hi = (mid, hi) if cov(mid) >= target else (lo, mid)
+            centre = lips + u * lo
+        return colour, alpha, height, mass, centre
+
     def __getitem__(self, t):
         frame = self.frames[t]
         if t not in self.by_frame:
@@ -325,6 +485,12 @@ class Occluder:
         k = self.by_frame[t]
         ep = self.plan[k]
         shape = frame.shape[:2]
+        if ep.get("type") == "replay":
+            if (k, t) not in self._offset:
+                self._offset[(k, t)] = self._place_replay(k, t, shape)
+            colour, alpha, height, mass, centre = self._offset[(k, t)]
+            a_full, (x0, y0) = self._alpha_at(alpha, centre, shape, mass)
+            return self._composite(frame, t, colour, alpha, a_full, x0, y0, height)
         start, end = ep["start"], ep["start"] + ep["length"]
         colour, alpha, _, mass = self._patch(ep, self.regions.face_size(t))
         if t < start:                        # entry: from one hand-size out to the first core position
@@ -339,7 +505,10 @@ class Occluder:
             d, height = self._calibrated_offset(k, t, shape)
         centre = self.regions.centre(t, ep["region"]) + np.array(ep["direction"]) * d
         a_full, (x0, y0) = self._alpha_at(alpha, centre, shape, mass)
+        return self._composite(frame, t, colour, alpha, a_full, x0, y0, height)
 
+    def _composite(self, frame, t, colour, alpha, a_full, x0, y0, height):
+        shape = frame.shape[:2]
         out = frame.astype(np.float32)
         # Soft shadow, down and to the side of the hand, on what is under it.
         shadow = cv2.GaussianBlur(a_full, (0, 0), max(1.0, 0.05 * height))

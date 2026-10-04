@@ -5,7 +5,8 @@
         [--stats occlusion_stats.json] --variants 3 [--names list.txt] [--seed 0]
 
 For each clip and each variant k: sample an occlusion plan (seeded by clip
-name, k and ``--seed``) from the real statistics, paste the hands on the
+name, k and ``--seed``) -- parametric episodes from the real statistics, or
+with ``--replay`` real episodes' dynamics (build_replay_bank.py) -- paste the hands on the
 clip's frames **before** face detection and cropping, and run the whole
 TEASER feature extraction on the pasted frames. Writes
 ``<out>/<clip>.v<k>.npz``: the same keys as a clean cache (``expression`` etc.
@@ -47,6 +48,9 @@ def main():
     parser.add_argument("--variants", type=int, default=3)
     parser.add_argument("--regions", type=Path, help="export_face_regions.py output: place and measure on the "
                                                      "fit's FLAME regions (default: MediaPipe landmarks)")
+    parser.add_argument("--replay", type=Path, help="build_replay_bank.py .jsonl: replay real occlusion dynamics "
+                                                    "instead of parametric paths")
+    parser.add_argument("--hand_index", type=Path, help="build_hand_bank.py index.tsv (hand side and pose, for --replay)")
     parser.add_argument("--segments", type=Path, help="segments.json of select_clean_clips.py: paste only "
                                                       "inside each clip's clean segments")
     parser.add_argument("--names", type=Path, help="clip names (default: every clean cache)")
@@ -62,6 +66,8 @@ def main():
     stats_path = args.stats.resolve() if args.stats else None
     names_path = args.names.resolve() if args.names else None
     regions_dir = args.regions.resolve() if args.regions else None
+    replay_path = args.replay.resolve() if args.replay else None
+    index_path = args.hand_index.resolve() if args.hand_index else None
     segments = json.loads(args.segments.read_text()) if args.segments else {}
     checkpoint = args.checkpoint.resolve()
     os.chdir(REPO_ROOT)
@@ -78,6 +84,10 @@ def main():
     bank = oa.HandBank(hands, [l.strip() for l in hand_list.read_text().splitlines() if l.strip()]
                        if hand_list else None)
     stats = oa.OcclusionStats(stats_path)
+    replay = oa.load_replay_bank(replay_path) if replay_path else None
+    hand_index = oa.load_hand_index(index_path, bank.names) if replay_path else None
+    if replay is not None and not replay:
+        raise SystemExit(f"empty replay bank {replay_path}")
     encoder = load_teaser_encoder(checkpoint, device)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,7 +102,10 @@ def main():
                 continue
             started = time.time()
             rng = np.random.default_rng([args.seed, k, zlib.crc32(name.encode())])
-            plan = oa.sample_plan(len(frames), stats, bank.names, rng, segments=segments.get(name))
+            if replay is not None:
+                plan = oa.sample_replay_plan(len(frames), replay, hand_index, rng, segments=segments.get(name))
+            else:
+                plan = oa.sample_plan(len(frames), stats, bank.names, rng, segments=segments.get(name))
             regions = (oa.FaceRegions.from_fit(regions_dir / f"{name}.regions.npz") if regions_dir
                        else oa.FaceRegions.from_landmarks(landmarks))
             occluder = oa.Occluder(frames, regions, plan, bank)
