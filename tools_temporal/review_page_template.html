@@ -57,6 +57,24 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
     <p class="tag" id="stamp"></p>
   </header>
 
+  <section style="display:grid;gap:10px" id="run_section" hidden>
+    <h2>First training run</h2>
+    <p class="muted" id="run_intro"></p>
+    <div class="box scroll"><table class="t" id="run_table"></table></div>
+    <div class="cols" style="grid-template-columns:minmax(0,1.3fr) minmax(0,1fr)">
+      <div class="box"><h3>Learning curves: validation vs training score</h3>
+        <div class="legend"><span><span class="sw" style="background:var(--real)"></span>validation (held-out signers, hands, dynamics)</span><span><span class="sw" style="background:var(--param)"></span>training clips (same metrics)</span></div>
+        <div id="run_curve"></div><p class="tag">score = occluded + near-occlusion mouth error (fakes) + clean face error + clean jerk (real); lower is better</p></div>
+      <div class="box scroll"><h3>Per corpus, best checkpoint</h3><table class="t" id="run_corpus"></table></div>
+    </div>
+  </section>
+
+  <section style="display:grid;gap:10px" id="results_section" hidden>
+    <h2>Model outputs on training clips</h2>
+    <p class="muted">The face each method reconstructs, rendered from the front with the clip's mean identity and the head pose removed, so only expression, jaw and eyelids differ. <b>Synthetic</b>: a pasted hand on a clean clip, with the target (TEASER on the frame without the hand). <b>Real</b>: a real hand over the mouth in a training clip; those frames are outside the clean segments, were never a training target, and have no ground truth. The curve is the mouth opening (vertical extent of the lips) over a longer stretch; shaded: hand over the face.</p>
+    <div id="results" style="display:grid;gap:16px"></div>
+  </section>
+
   <section style="display:grid;gap:10px">
     <h2>How many frames are occluded</h2>
     <p class="muted">Occluded = the hands cover more than 20% of the mouth/nose/chin region (the RGB2SMPLX occlusion protocol's region and threshold, used for real and fake alike). "Training windows" is the share a 16-frame training window shows occluded when a fraction p of the windows comes from the variants.</p>
@@ -212,6 +230,90 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
       <tr><th class="r">Crop TEASER sees</th>${cells(s => `<img class="crop" src="${s.crop_occ}" alt="face crop ${s.t}">`)}</tr>
       </tbody></table></div></div>`;
   })).join("");
+
+  // 0. Training run and model outputs
+  const RUN = R._run;
+  if (RUN && RUN.eval) {
+    document.getElementById("run_section").hidden = false;
+    const E = RUN.eval, names = Object.keys(E).filter(k => !k.startsWith("_"));
+    const best = RUN.summary ? RUN.summary.best_step : null;
+    document.getElementById("run_intro").textContent = `${RUN.name}: adapter gated on c_t, mask token, replayed fake occlusions (p = 0.5), three corpora. Validation set: held-out signers, hands and occlusion dynamics. Best checkpoint at step ${best}. Errors in mm against TEASER on the unoccluded frames; jerk in mm per frame³.`;
+    const rowsR = [["synthetic", "occluded", "err_mouth", "Mouth error, occluded frames (fake hands)"],
+      ["synthetic", "near", "err_mouth", "Mouth error, frames next to the occlusion"],
+      ["synthetic", "occluded", "err_face", "Face error, occluded frames"],
+      ["real", "clean", "err_face", "Face drift from TEASER, clean real frames"],
+      ["real", "clean", "err_mouth", "Mouth drift from TEASER, clean real frames"],
+      ["real", "clean", "jerk", "Jerk, clean real frames (jitter)"],
+      ["real", "near", "jerk", "Jerk, frames next to real occlusions"]];
+    const label = { T0: "TEASER (T0)", T1: "SG9 (T1)", T2: "SG9 + interp, current pipeline (T2)", T7: "Temporal (T7)" };
+    let rt = `<thead><tr><th>Metric</th>${names.map(n => `<th>${label[n] || n}</th>`).join("")}</tr></thead><tbody>`;
+    rowsR.forEach(([k, g, m, l]) => {
+      const vals = names.map(n => ((E[n][k] || {})[g] || {})[m]);
+      const lo = Math.min(...vals.filter(v => v != null && !isNaN(v)));
+      rt += `<tr><td>${l}</td>${vals.map(v => `<td>${v == null || isNaN(v) ? "–" : (v === lo ? `<b>${v.toFixed(3)}</b>` : v.toFixed(3))}</td>`).join("")}</tr>`;
+    });
+    const dur = Object.keys((E[names[0]].synthetic || {}).by_duration || {});
+    dur.forEach(b => {
+      const vals = names.map(n => E[n].synthetic.by_duration[b]);
+      const lo = Math.min(...vals);
+      rt += `<tr><td>Mouth error, episodes of ${b.replace("inf", "∞")} frames</td>${vals.map(v => `<td>${v === lo ? `<b>${v.toFixed(3)}</b>` : v.toFixed(3)}</td>`).join("")}</tr>`;
+    });
+    document.getElementById("run_table").innerHTML = rt + "</tbody>";
+    if (RUN.summary) {
+      const rows = RUN.summary.rows.filter(r => r.score != null);
+      const W = 520, H = 200, L = 40, Rr = 10, T = 10, B = 26;
+      const xs = rows.map(r => r.step), ys = rows.flatMap(r => [r.score, r.train_score].filter(v => v != null));
+      const xmax = Math.max(...xs), ymin = Math.floor(Math.min(...ys) * 2) / 2, ymax = Math.ceil(Math.max(...ys) * 2) / 2;
+      const x = v => L + (v / xmax) * (W - L - Rr), y = v => T + (1 - (v - ymin) / (ymax - ymin)) * (H - T - B);
+      let sv = "";
+      for (let v = ymin; v <= ymax + 1e-9; v += 0.5) { sv += `<line x1="${L}" x2="${W - Rr}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${v.toFixed(1)}</text>`; }
+      for (let k = 0; k <= 4; k++) { const v = Math.round(xmax * k / 4); sv += `<text x="${x(v)}" y="${H - 8}" text-anchor="middle">${v}</text>`; }
+      const line = (key, col) => `<polyline fill="none" stroke="${col}" stroke-width="2" points="${rows.filter(r => r[key] != null).map(r => `${x(r.step)},${y(r[key])}`).join(" ")}"/>` +
+        rows.filter(r => r[key] != null).map(r => `<circle cx="${x(r.step)}" cy="${y(r[key])}" r="2.5" fill="${col}"/>`).join("");
+      sv += line("score", "var(--real)") + line("train_score", "var(--param)");
+      if (best) sv += `<line x1="${x(best)}" x2="${x(best)}" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-dasharray="3 3"/><text x="${x(best) + 4}" y="${T + 10}">best</text>`;
+      document.getElementById("run_curve").innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img">${sv}</svg>`;
+    }
+    if (RUN.by_corpus) {
+      const g = (m, k, gr, key) => (((m[k] || {})[gr] || {})[key]);
+      let tc = `<thead><tr><th>Corpus</th><th>Occluded mouth err</th><th>Near mouth err</th><th>Clean drift</th><th>Clean jerk</th></tr></thead><tbody>`;
+      Object.entries(RUN.by_corpus).sort().forEach(([c, m]) => {
+        const f = v => v == null ? "–" : v.toFixed(3);
+        tc += `<tr><td>${NAMES[c] || c}</td><td>${f(g(m, "synthetic", "occluded", "err_mouth"))}</td><td>${f(g(m, "synthetic", "near", "err_mouth"))}</td><td>${f(g(m, "real", "clean", "err_face"))}</td><td>${f(g(m, "real", "clean", "jerk"))}</td></tr>`;
+      });
+      document.getElementById("run_corpus").innerHTML = tc + "</tbody>";
+    }
+  }
+
+  const RES = R._results;
+  if (RES && RES.examples && RES.examples.length) {
+    document.getElementById("results_section").hidden = false;
+    const COLORS = { "TEASER (T0)": "var(--muted)", "SG9 + interp (T2)": "var(--param)", "Temporal (T7)": "var(--replay)", "Target": "var(--real)" };
+    function curve(ex) {
+      const W = 520, H = 150, L = 34, Rr = 8, T = 8, B = 22;
+      const n = ex.curve_frames.length, all = Object.values(ex.curves).flat();
+      const lo = Math.floor(Math.min(...all)), hi = Math.ceil(Math.max(...all));
+      const x = i => L + i * (W - L - Rr) / Math.max(n - 1, 1), y = v => T + (1 - (v - lo) / Math.max(hi - lo, 1e-6)) * (H - T - B);
+      let s = "";
+      ex.pasted.forEach((p, i) => { if (p) s += `<rect x="${x(i) - (W - L - Rr) / n / 2}" y="${T}" width="${(W - L - Rr) / n}" height="${H - T - B}" fill="var(--ep)"/>`; });
+      for (let k = 0; k <= 2; k++) { const v = lo + (hi - lo) * k / 2; s += `<line x1="${L}" x2="${W - Rr}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${v.toFixed(0)}</text>`; }
+      [0, Math.floor(n / 2), n - 1].forEach(i => { s += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${ex.curve_frames[i]}</text>`; });
+      Object.entries(ex.curves).forEach(([k, v]) => { s += `<polyline fill="none" stroke="${COLORS[k] || "var(--fg)"}" stroke-width="${k.startsWith("Temporal") ? 2.4 : 1.6}" points="${v.map((u, i) => `${x(i)},${y(u)}`).join(" ")}"/>`; });
+      return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:640px;height:auto" role="img">${s}</svg>
+        <div class="legend">${Object.keys(ex.curves).map(k => `<span><span class="sw" style="background:${COLORS[k] || "var(--fg)"}"></span>${k}</span>`).join("")}<span class="tag">mouth opening, mm · frame</span></div>`;
+    }
+    document.getElementById("results").innerHTML = RES.examples.map(ex => {
+      const inCore = t => t >= ex.core[0] && t < ex.core[1];
+      const cells = fn => ex.frames.map((t, i) => `<td class="${inCore(t) ? "ep" : ""}">${fn(t, i)}</td>`).join("");
+      const rows = Object.entries(ex.renders).map(([k, imgs]) => `<tr><th class="r">${k}</th>${cells((t, i) => `<img class="crop" src="${imgs[i]}" alt="${k} frame ${t}">`)}</tr>`).join("");
+      return `<div class="box" style="display:grid;gap:8px"><h3>${NAMES[ex.corpus]} · <span class="pill">${ex.kind === "real" ? "real occlusion, no ground truth" : "synthetic occlusion, with target"}</span></h3>
+        <span class="tag">${ex.clip}${ex.variant ? " · " + ex.variant : ""}${ex.c_mnc ? " · real coverage per frame: " + ex.c_mnc.join(" ") : ""}</span>
+        <div class="scroll"><table class="strip"><tbody>
+        <tr><th class="r">Frame</th>${cells(t => t)}</tr>
+        <tr><th class="r">Crop TEASER sees</th>${cells((t, i) => `<img class="crop" src="${ex.crops[i]}" alt="crop ${t}">`)}</tr>
+        ${rows}</tbody></table></div>${curve(ex)}</div>`;
+    }).join("");
+  }
 
   // 7. Findings, partly computed from the numbers above
   const items = [];

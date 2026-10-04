@@ -19,11 +19,28 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--notes", type=Path)
+    parser.add_argument("--run", type=Path, help="a training run directory (summary.json, eval_val.json)")
+    parser.add_argument("--results", type=Path, help="render_results.py output")
     args = parser.parse_args()
     report = json.loads(args.report.read_text())
     report["_stamp"] = f"Built {datetime.datetime.now():%Y-%m-%d %H:%M} from {args.report.name}"
     if args.notes and args.notes.is_file():
         report["_notes"] = json.loads(args.notes.read_text())
+    if args.run:
+        run = {"name": args.run.name}
+        for key, file in (("summary", "summary.json"), ("eval", "eval_val.json")):
+            if (args.run / file).is_file():
+                run[key] = json.loads((args.run / file).read_text())
+        if "summary" in run:
+            run["summary"].pop("training", None)
+            best = run["summary"].get("best_step")
+            for line in (args.run / "log.jsonl").read_text().splitlines():
+                entry = json.loads(line)
+                if entry.get("step") == best and "val" in entry:
+                    run["by_corpus"] = entry["val"].get("by_corpus")
+        report["_run"] = run
+    if args.results and args.results.is_file():
+        report["_results"] = json.loads(args.results.read_text())
     data = json.dumps(report).replace("</", "<\\/")
     args.out.write_text(TEMPLATE.read_text().replace("__DATA__", data))
     print(f"[page] {args.out} ({args.out.stat().st_size // 1024} KB)")
