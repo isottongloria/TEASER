@@ -611,3 +611,18 @@ T4 (no synthetic occlusion) stays at TEASER (0.08 mm drift) and does not
 help under occlusion. Jerk is still far above SG9 at this length of
 training (`w_accel` untuned). Training ~35 ms/step, the adapter ~0.02 ms
 per frame at inference.
+
+### Pilot dataset v3, 2026-10-04 (review page: `tools_temporal/sbatch/pilot_stats_report.sbatch`)
+
+Fakes calibrated on the protocol's mouth/nose/chin coverage (5.4). Per episode,
+real (whole corpus) vs parametric vs replay:
+
+| corpus | median duration (ms) | median peak mnc | peak >= 0.6 |
+|---|---|---|---|
+| PHOENIX | 120 / 120 / 120 | 0.42 / 0.40 / 0.39 | 28 % / 22 % / 23 % |
+| CSL-Daily | 133 / 133 / 100 | 0.41 / 0.40 / 0.37 | 24 % / 22 % / 21 % |
+| How2Sign | 100 / 100 / 100 | 0.26 / 0.27 / 0.40 (pooled dynamics) | 6 % / 6 % / 24 % |
+
+Occluded frames: real corpus 10.5 % (PHOENIX), 7.6 % (CSL-Daily), 1.3 %
+(How2Sign); selected training clips 2.0 / 2.0 / 0.4 % (outside their clean
+segments); training windows at occ_aug_p 0.5: 9-11 % (0.3: ~6 %, 0.7: 13-15 %).
