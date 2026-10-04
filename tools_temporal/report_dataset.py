@@ -67,31 +67,37 @@ def corpus_report(data, corpus, rng):
                    "peak_mouth": stats["coverage"]["peak_mouth"],
                    "peak_mouth_values": stats["coverage"]["peak_mouth_values"]}
 
-    syn_dur, syn_cov, syn_frames, total_frames, n_var, regions = [], [], 0, 0, 0, Counter()
-    variants = sorted((root / "variants").glob("*.npz"))
-    for path in variants:
-        with np.load(path) as v:
-            plan = json.loads(str(v["plan"]))
-            mask, c_syn = v["syn_mask"], v["c_syn"]
-        n_var += 1
-        syn_frames += int(mask.sum())
-        total_frames += len(mask)
-        for ep in plan:
-            syn_dur.append(ep["length"])
-            regions[ep["region"]] += 1
-            sl = slice(ep["start"], ep["start"] + ep["length"])
-            col = 0 if ep["region"] == "mouth" else 1
-            syn_cov.append(float(c_syn[sl, col].max()) if c_syn[sl].size else 0.0)
-    out["synthetic"] = {"variants": n_var, "episodes": len(syn_dur), "frames_with_hand": syn_frames,
-                        "frames": total_frames, "durations": dict(sorted(Counter(syn_dur).items())),
-                        "duration_mean": float(np.mean(syn_dur)) if syn_dur else 0.0,
-                        "duration_median": float(np.median(syn_dur)) if syn_dur else 0.0,
-                        "coverage_values": [round(x, 3) for x in syn_cov], "regions": dict(regions)}
+    out["synthetic"] = {}
+    for mode, folder in (("param_v1", "variants_v1"), ("param", "variants"), ("replay", "variants_replay")):
+        variants = sorted((root / folder).glob("*.npz"))
+        if not variants:
+            continue
+        durations, cov, regions, pasted, occluded, total = [], [], Counter(), 0, 0, 0
+        for path in variants:
+            with np.load(path) as v:
+                plan = json.loads(str(v["plan"]))
+                mask, c_syn = v["syn_mask"], v["c_syn"]
+            pasted += int(mask.sum())
+            occluded += int((mask & (c_syn.max(1) > 0.2)).sum())
+            total += len(mask)
+            for ep in plan:
+                durations.append(ep["length"])
+                regions[ep["region"]] += 1
+                col = 0 if ep["region"] == "mouth" else 1
+                first = ep["start"] - ep.get("entry", 0)
+                span = slice(first, ep["start"] + ep["length"] + ep.get("exit", 0))
+                cov.append(float(c_syn[span, col].max()) if c_syn[span].size else 0.0)
+        out["synthetic"][mode] = {
+            "variants": len(variants), "episodes": len(durations), "frames_with_hand": pasted,
+            "frames_occluded": occluded, "frames": total, "durations": dict(sorted(Counter(durations).items())),
+            "duration_mean": float(np.mean(durations)) if durations else 0.0,
+            "duration_median": float(np.median(durations)) if durations else 0.0,
+            "coverage_values": [round(x, 3) for x in cov], "regions": dict(regions)}
 
     bank = {}
     for split in ("train", "heldout"):
         names = [l[0] for l in lines(lists / f"hands_{split}.txt")]
-        files = [data / "hand_bank" / split / f"{n}.png" for n in names]
+        files = [data / "hand_bank" / corpus / split / f"{n}.png" for n in names]
         heights = [cv2.imread(str(f), cv2.IMREAD_UNCHANGED).shape[0] for f in files[:400]]
         pick = [files[i] for i in rng.choice(len(files), min(12, len(files)), replace=False)] if files else []
         bank[split] = {"count": len(files), "signers": len({n.split("__")[1] for n in names}),
@@ -99,35 +105,35 @@ def corpus_report(data, corpus, rng):
                        "samples": [hand_tile(f) for f in pick]}
     out["hands"] = bank
 
-    # Two example episodes: one from a training variant, one from a test variant.
+    # Examples: a parametric and a replayed episode on training clips, a replayed one on a test clip.
     examples = []
-    for split in ("train", "test"):
+    for mode, folder, split in (("param", "variants", "train"), ("replay", "variants_replay", "train"),
+                                ("replay", "variants_replay", "test")):
         names = {c for c, _ in lines(lists / f"{split}.txt")}
-        cands = [p for p in variants if p.name.split(".v")[0] in names]
+        cands = [p for p in sorted((root / folder).glob("*.npz")) if p.name.split(".v")[0] in names]
         rng.shuffle(cands)
         for path in cands:
             clip = path.name.split(".v")[0]
             with np.load(path) as v:
                 plan = json.loads(str(v["plan"]))
                 tform_occ = v["tform"]
-                c_syn = v["c_syn"]
-            good = [ep for ep in plan if ep["region"] == "mouth" and 3 <= ep["length"] <= 8
-                    and c_syn[ep["start"]:ep["start"] + ep["length"], 0].max() >= 0.5]
+            good = [ep for ep in plan if ep["region"] == "mouth" and 3 <= ep["length"] <= 10
+                    and ep["coverage"] > 0.5]
             if not good:
                 continue
             ep = good[0]
             with np.load(root / "cache" / f"{clip}.npz") as c:
-                landmarks = c["landmarks"].astype(np.float64)
                 tform_clean = c["tform"]
             frames = vc.Frames(vc.list_frames(root / "clips" / clip / "frames"), 1 << 30)
-            hands = oa.HandBank(str(data / "hand_bank" / ("train" if split == "train" else "heldout")),
-                                [l[0] for l in lines(lists / f"hands_{'train' if split == 'train' else 'heldout'}.txt")])
-            regions_path = root / "regions" / f"{clip}.regions.npz"
-            regions = oa.FaceRegions.from_fit(regions_path) if regions_path.is_file() \
-                else oa.FaceRegions.from_landmarks(landmarks)
-            occ = oa.Occluder(frames, regions, plan, hands)
+            bank_split = "train" if split == "train" else "heldout"
+            hands = oa.HandBank(str(data / "hand_bank" / corpus / bank_split),
+                                [l[0] for l in lines(lists / f"hands_{bank_split}.txt")])
+            occ = oa.Occluder(frames, oa.FaceRegions.from_fit(root / "regions" / f"{clip}.regions.npz"), plan, hands)
             lo = max(0, ep["start"] - ep.get("entry", 0) - 1)
             hi = min(len(frames), ep["start"] + ep["length"] + ep.get("exit", 0) + 1)
+            for t in range(len(frames)):   # compute every pasted frame in order (replay uses the previous one)
+                if occ.syn_mask[t] and t < hi:
+                    occ[t]
             crop = lambda img, T: warp(img, SimilarityTransform(matrix=T.astype(float)).inverse,
                                        output_shape=(224, 224), preserve_range=True).astype(np.uint8)
             strip = []
@@ -137,11 +143,13 @@ def corpus_report(data, corpus, rng):
                 fit = lambda im: cv2.resize(im, (int(im.shape[1] * h / im.shape[0]), h), interpolation=cv2.INTER_AREA)
                 strip.append({"t": t, "in_episode": bool(occ.core_mask[t]), "pasted": bool(occ.syn_mask[t]),
                               "coverage": round(float(occ.c_syn[t, 0]), 2),
+                              "source_coverage": (ep["frames"][t - (ep["start"] - ep["entry"])]["c_mouth"]
+                                                  if ep.get("type") == "replay" and occ.syn_mask[t] else None),
                               "clean": b64(fit(clean_img)), "occluded": b64(fit(occ_img)),
                               "crop_occ": b64(cv2.resize(crop(occ_img, tform_occ[t]), (128, 128))),
                               "crop_clean": b64(cv2.resize(crop(clean_img, tform_clean[t]), (128, 128)))})
-            examples.append({"split": split, "clip": clip, "variant": path.name[:-4], "hand": ep["hand"],
-                             "length": ep["length"], "strip": strip})
+            examples.append({"mode": mode, "split": split, "clip": clip, "variant": path.name[:-4],
+                             "hand": ep["hand"], "length": ep["length"], "source": ep.get("source"), "strip": strip})
             break
     out["examples"] = examples
     return out
@@ -159,7 +167,8 @@ def main():
     args.out.write_text(json.dumps(report))
     for c, r in report.items():
         print(c, {s: (v["clips"], v["clean_frames"]) for s, v in r["splits"].items()},
-              "variants", r["synthetic"]["variants"], "hands", {k: v["count"] for k, v in r["hands"].items()})
+              "variants", {m: v["variants"] for m, v in r["synthetic"].items()},
+              "hands", {k: v["count"] for k, v in r["hands"].items()})
 
 
 if __name__ == "__main__":

@@ -298,41 +298,60 @@ TemporalAdapter(feat_dim, arch='transformer', d_model=256, n_layers=2, window=16
 
 ### 5.4 Synthetic occlusion -- `src/temporal/occlusion_aug.py` (`--synthetic_occlusion`)
 
-- RGBA hand patches pasted on the **full frame before detection and
-  cropping**, so the face detector and the crop react as they do to a real
-  hand.
-- The patches are cut from our own sign-language frames
-  (`tools_temporal/build_hand_bank.py`), using the pipeline's fits: frames
-  where WiLoR saw the hand, the hand is away from the face and from the other
-  hand, sharp (Laplacian variance) and large enough; the MANO hand mesh of
-  the fit projected with the fit's camera gives the silhouette, refined on
-  the image with GrabCut, then cropped to RGBA. Hand poses are clustered
-  (MANO pose) so the bank covers different handshapes, not one pose many
-  times. Same lighting, resolution, blur and sleeves as the real occluder.
-  High-resolution hands come from CSL-Daily (1280 px) and are only ever
-  downscaled; PHOENIX hands (20-30 px) are used on PHOENIX only. A hand's
-  identity is its signer, so the bank's train / test split is the signer
-  split (4.2b). An external hand image set is only a fallback.
-- Random scale, rotation, Lab mean/std colour transfer towards the face skin.
-- Trajectories: the hand enters, stays, leaves, over mouth or eyes; position,
-  duration and coverage (partial / total) sampled from the real statistics
-  (4.3 / 5.2): mostly 1-5 frames, a tail up to ~20, partial as well as total
-  coverage.
-- Returns the synthetic `c_t`, computed from the pasted alpha mask over the
-  lips / eye contours of the clean clip's MediaPipe landmarks (scaled 1.3x /
-  1.5x to cover what FLAME's regions cover).
-- Pasting before detection means re-running MediaPipe and the crop, which is
-  too slow per training window. So the variants are made **offline**
-  (`tools_temporal/make_synthetic_variants.py`): K occluded variants per clip,
-  each a full re-extraction stored as a cache like the clean one plus
-  `c_syn`, `syn_mask`, the plan, and the clean cache it belongs to. Training
-  draws windows from them; the target stays TEASER on the clean clip.
-- `HandBank('procedural')` draws a skin-coloured palm-and-fingers shape. It is
-  for smoke tests only, never a training occluder.
-- **Hold-out for the test set** (7.2): the hand PNGs are split once into
-  train / test identities (`--hands_split`), and the test set also uses a
-  second trajectory generator that replays real hand motion (2D keypoint
-  tracks of held-out signers) instead of the parametric one.
+Hands are pasted on the **full frame before face detection and cropping**, so
+the face detector and the crop react as they do to a real hand, and only
+inside clean segments, so every covered frame has a clean target. Variants
+are made offline (`tools_temporal/make_synthetic_variants.py`): each is a
+full re-extraction stored like a clean cache plus `c_syn` (coverage of lips
+and eyes per frame), `syn_mask` (any pasted hand), `core_mask`, the plan and
+the clean cache it belongs to. A synthetic frame counts as occluded at
+coverage > 0.2, like a real one.
+
+**Regions and coverage** are those of real occlusion: the fit's FLAME lips /
+eye region projected with the fit's camera (`export_face_regions.py`),
+coverage = share of the region's convex hull under the hand (alpha > 0.5).
+
+**Hand bank** (`build_hand_bank.py`, per corpus, `data/temporal/hand_bank/<corpus>/{train,heldout}`):
+cut-outs from our own frames where the hand is away from the face; the fit's
+MANO hand plus a forearm stub seeds GrabCut; scale-free sharpness, a
+skin-colour check against mostly-sleeve cut-outs, and the forearm faded out
+so the arm does not end in a straight cut. Training hands come from training
+signers, held-out hands from validation / test signers; hands are pasted on
+the same corpus only.
+
+**Pasting**: the hand's Lab means move halfway to the face's skin (texture
+kept), the edge is feathered in proportion to the hand's size, a soft shadow
+darkens the face beside it.
+
+Two ways to move the hand (both made, compared on the review page):
+
+- **Parametric (v2)**: episodes sampled from the real statistics -- duration,
+  peak coverage, region (eyes instead of mouth at the real *eyes-only* rate,
+  4-5 %) -- with 2-4 entry and exit frames; on every core frame the hand's
+  offset from the region centre is bisected to the target coverage (median
+  error 0.009 on a preview).
+- **Replay** (`build_replay_bank.py`): the dynamics of real episodes from the
+  same corpus and split, read from the fits and occlusion files: per frame
+  the hand's position relative to the lips in the face's frame, its size,
+  its wrist-to-hand direction and the source's lip-coverage curve, with the
+  episode's own approach and retreat; the hand is a bank cut-out of the same
+  side with a near MANO pose; each frame is calibrated to the source's
+  coverage and motion-blurred by the hand's speed. Durations, motion and
+  coverage curves are real by construction.
+
+Tried and dropped: transplanting the real occluding hand's *pixels*
+(`build_transplant_bank.py`). In front of the face the fitted hand is not
+accurate enough to separate hand skin from face skin, and the cut-outs carry
+the source signer's lips, nose or eye -- the worst possible corruption for a
+model meant to read the mouth.
+
+History: the first variants (`variants_v1/`) put 44 % of PHOENIX hands on the
+eyes (the rate of mouth episodes whose hand *also* touches the eyes was read
+as an eyes-instead-of-mouth rate), under-covered the lips (median 0.69 vs
+0.97 real) and missed the region in 15-29 % of episodes; v2 fixes all three.
+
+`HandBank('procedural')` draws a skin-coloured palm-and-fingers shape: smoke
+tests only.
 
 ### 5.5 Losses -- `src/temporal/losses.py` (weight 0 = off)
 
