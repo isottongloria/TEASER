@@ -92,17 +92,29 @@ def compute_losses(pred, batch, flame, region_index, cfg):
     return out
 
 
+def corpus_of(name):
+    """Corpus of a clip name: How2Sign chunks start with h2s_, CSL-Daily is S######_P####_T##."""
+    import re
+    if name.startswith("h2s_"):
+        return "how2sign"
+    return "csl_daily" if re.match(r"S\d{6}_P\d{4}_T\d{2}", name) else "phoenix"
+
+
 def evaluate(model, clips, variants, flame, region_names, cfg, device, with_baseline=False):
-    """Validation metrics pooled over clips: real clips (fidelity, stability) and variants (recovery)."""
+    """Metrics pooled over clips -- real clips (fidelity, stability) and variants (recovery) --
+    overall and per corpus (``by_corpus``). With ``with_baseline`` also TEASER per-frame and SG9."""
     import torch
     from src.temporal import metrics as M
     from src.temporal.data import full_clip
+    from src.temporal.postproc import savgol
 
     region_index = {r: flame.region_index(r) for r in region_names}
     region_index["face"] = np.arange(flame.vertex_ids.numel())
     model.eval()
     results = {"real": [], "synthetic": []}
     baseline = {"real": [], "synthetic": []}
+    sg9 = {"real": [], "synthetic": []}
+    per_corpus = {}
     for kind, items in (("real", clips), ("synthetic", variants)):
         for clip in items:
             batch = to_device(full_clip(clip), device)
@@ -117,15 +129,21 @@ def evaluate(model, clips, variants, flame, region_names, cfg, device, with_base
                 groups = M.frame_groups(clip.syn_occ, valid, cfg.loss.near_k + 1, exclude=real_occ)
             ref_v = M.canonical_mm(flame, ref, device)
             episodes = clip.episodes if kind == "synthetic" else None
-            results[kind].append(M.clip_metrics(M.canonical_mm(flame, pred, device), ref_v, groups,
-                                                region_index, episodes))
+            result = M.clip_metrics(M.canonical_mm(flame, pred, device), ref_v, groups, region_index, episodes)
+            results[kind].append(result)
+            per_corpus.setdefault(corpus_of(clip.name), {"real": [], "synthetic": []})[kind].append(result)
             if with_baseline:
                 baseline[kind].append(M.clip_metrics(M.canonical_mm(flame, clip.input_params, device), ref_v,
                                                      groups, region_index, episodes))
+                smoothed = {k: savgol(v, 9, 2) for k, v in clip.input_params.items()}
+                sg9[kind].append(M.clip_metrics(M.canonical_mm(flame, smoothed, device), ref_v,
+                                                groups, region_index, episodes))
     model.train()
     out = {kind: M.pool(r) for kind, r in results.items() if r}
+    out["by_corpus"] = {c: {kind: M.pool(r) for kind, r in v.items() if r} for c, v in per_corpus.items()}
     if with_baseline:
         out["teaser"] = {kind: M.pool(r) for kind, r in baseline.items() if r}
+        out["sg9"] = {kind: M.pool(r) for kind, r in sg9.items() if r}
     return out
 
 
@@ -170,6 +188,12 @@ def main():
     val_clips = load_clips(read_list(dc.val_list), dc.cache_dir, dc.occ_dir, dc.feature_set, dc.teacher_smoothing)
     train_variants = load_variants(train_clips, dc.variant_dir, dc.feature_set) if dc.variant_dir else []
     val_variants = load_variants(val_clips, dc.variant_dir, dc.feature_set) if dc.variant_dir else []
+    # The same metrics on part of the training set, to see overfitting (train improving, val not).
+    n_eval = int(cfg.train.get("eval_train_clips", 0))
+    step_eval = max(1, len(train_clips) // max(n_eval, 1))
+    train_eval_clips = train_clips[::step_eval][:n_eval] if n_eval else []
+    eval_names = {c.name for c in train_eval_clips}
+    train_eval_variants = [v for v in train_variants if v.clean.name in eval_names and v.name.endswith(".v0")]
     print(f"[train] {len(train_clips)} train clips ({sum(len(c) for c in train_clips)} frames), "
           f"{len(train_variants)} variants; {len(val_clips)} val clips, {len(val_variants)} variants")
 
@@ -227,7 +251,12 @@ def main():
         if step % tc.val_every == 0 or step == tc.steps:
             metrics = evaluate(model, val_clips, val_variants, flame, REGIONS, cfg, device)
             score = val_score(metrics)
-            log.write(json.dumps({"step": step, "val": metrics, "score": score}) + "\n")
+            entry = {"step": step, "val": metrics, "score": score}
+            if train_eval_clips:
+                train_metrics = evaluate(model, train_eval_clips, train_eval_variants, flame, REGIONS, cfg, device)
+                entry["train_eval"] = train_metrics
+                entry["train_score"] = val_score(train_metrics)
+            log.write(json.dumps(entry) + "\n")
             log.flush()
             state = {"config": OmegaConf.to_container(cfg), "step": step, "score": score,
                      "model": {k: v for k, v in model.state_dict().items()}}
@@ -235,7 +264,8 @@ def main():
             if score < best:
                 best = score
                 torch.save(state, out_dir / "best.pt")
-            print(f"[train] step {step} val score {score:.4f} (best {best:.4f})")
+            print(f"[train] step {step} val score {score:.4f} (best {best:.4f})"
+                  + (f", train score {entry['train_score']:.4f}" if train_eval_clips else ""))
     log.close()
 
 

@@ -56,3 +56,4 @@ train:
   log_every: 50
   val_every: 500
   infer_stride: 4
+  eval_train_clips: 0     # >0: also evaluate on this many training clips (overfitting check)
