@@ -7,8 +7,10 @@ Runs in RGB2SMPLX's env:
 
 Writes ``<out>/<clip>.regions.npz``: ``mouth`` (T, K, 2) and ``eyes`` (T, K, 2),
 the FLAME lips / eye-region vertices (src/temporal/flame_regions.py) of the
-fitted mesh, projected with the fit's own camera -- exactly the regions
-compute_real_occlusion.py measures real occlusion on. Synthetic occlusion is
+fitted mesh, and ``mnc`` (T, 1053, 2), RGB2SMPLX's mouth/nose/chin set (the
+region of its occlusion protocol and severity classes), all projected with
+the fit's own camera -- exactly the regions compute_real_occlusion.py
+measures real occlusion on. Synthetic occlusion is
 placed and measured on the convex hulls of these, so real and synthetic
 coverage are the same quantity.
 """
@@ -43,12 +45,13 @@ def main():
             continue
         clip = line.split("\t")[0]
         target = args.out / f"{clip}.regions.npz"
-        if target.is_file():
+        if target.is_file() and "mnc" in np.load(target).files:
             continue
         npz = fit_for_geometry(dict(np.load(fit_of[clip])), geometry)
         projected = geometry.project_all_frames(geometry.forward_vertices(npz), npz)
         np.savez(target, mouth=projected[:, regions["mouth"]].astype(np.float32),
-                 eyes=projected[:, regions["eyes"]].astype(np.float32))
+                 eyes=projected[:, regions["eyes"]].astype(np.float32),
+                 mnc=projected[:, geometry.vertex_groups()["mouth_nose_chin"]].astype(np.float32))
         done += 1
     print(f"[regions] {done} clips -> {args.out}")
 

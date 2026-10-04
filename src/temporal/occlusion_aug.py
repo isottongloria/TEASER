@@ -59,13 +59,15 @@ def _scaled(points, scale):
 class FaceRegions:
     """Per-frame region hulls, face size and skin samples."""
 
-    def __init__(self, mouth_points, eyes_points):
+    def __init__(self, mouth_points, eyes_points, mnc_points=None):
         self.mouth, self.eyes = mouth_points, eyes_points  # (T, K, 2) each
+        self.mnc = mnc_points  # RGB2SMPLX's mouth/nose/chin set, when exported
 
     @classmethod
     def from_fit(cls, path):
         with np.load(path) as z:
-            return cls(z["mouth"].astype(np.float64), z["eyes"].astype(np.float64))
+            mnc = z["mnc"].astype(np.float64) if "mnc" in z.files else None
+            return cls(z["mouth"].astype(np.float64), z["eyes"].astype(np.float64), mnc)
 
     @classmethod
     def from_landmarks(cls, landmarks_xy):
@@ -187,7 +189,23 @@ class OcclusionStats:
             # Episodes on the eyes *instead of* the mouth. (fraction_reaching_eyes counts
             # mouth episodes whose hand also touches the eye region: not the same thing.)
             self.eyes_fraction = stats["coverage"].get("eyes_only_rate", 0.05)
+            # Real episodes as (peak mouth/nose/chin, peak lips, frames): sampled jointly,
+            # so a synthetic episode has the severity and length of a real one.
+            triples = stats["coverage"].get("episodes_mnc_lips_frames") or []
+            self.episodes = np.array([t for t in triples if t[0] > 0.2], dtype=np.float64) if triples else None
+        else:
+            self.episodes = None
         self.fallback_mean = fallback_mean
+
+    def episode(self, rng, max_len):
+        """(peak mnc coverage, peak lip coverage, core frames) of a real episode, lightly jittered."""
+        if self.episodes is None or not len(self.episodes):
+            lips = self.coverage(rng)
+            return min(1.0, 0.25 + 0.5 * lips), lips, self.duration(rng, max_len)
+        candidates = self.episodes[self.episodes[:, 2] <= max_len]
+        mnc, lips, frames = candidates[rng.integers(len(candidates))]
+        return (float(np.clip(mnc + rng.normal(0, 0.02), 0.21, 1.0)),
+                float(np.clip(lips + rng.normal(0, 0.02), 0.0, 1.0)), int(frames))
 
     def duration(self, rng, max_len):
         if self.durations is None:
@@ -206,6 +224,10 @@ def sample_plan(n_frames, stats, hand_names, rng, gap=(8, 24), max_len=20, eyes_
                 segments=None, entry=(2, 4)):
     """Episodes (entry + core of ``length`` frames + exit) inside the clean segments.
 
+    Each episode's length and its two peak coverages (mouth/nose/chin and lips)
+    are those of one real episode (OcclusionStats.episode), so synthetic
+    episodes have real severity and duration; how many there are is ours.
+
     ``segments`` ([[start, end_exclusive], ...], select_clean_clips.py): every
     pasted frame, entry and exit included, lies in one, so it has a clean
     target; default the whole clip. Episodes are ``gap`` frames apart.
@@ -215,7 +237,7 @@ def sample_plan(n_frames, stats, hand_names, rng, gap=(8, 24), max_len=20, eyes_
     for seg_start, seg_end in (segments if segments is not None else [(0, n_frames)]):
         t = seg_start + int(rng.integers(1, max(2, gap[0] // 2)))
         while True:
-            length = stats.duration(rng, max_len)
+            mnc, lips, length = stats.episode(rng, max_len)
             n_in, n_out = (int(rng.integers(entry[0], entry[1] + 1)) for _ in range(2))
             start = t + n_in
             if start + length + n_out > seg_end:
@@ -224,9 +246,9 @@ def sample_plan(n_frames, stats, hand_names, rng, gap=(8, 24), max_len=20, eyes_
             episodes.append({
                 "start": int(start), "length": int(length), "entry": n_in, "exit": n_out,
                 "region": "eyes" if rng.random() < eyes_fraction else "mouth",
-                "coverage": stats.coverage(rng),
+                "coverage": lips, "coverage_mnc": mnc,      # targets: lips and mouth/nose/chin
                 "hand": str(rng.choice(hand_names)),
-                "scale": float(rng.uniform(1.0, 1.6)),       # hand height / eye-region width
+                "scale": float(rng.uniform(1.0, 1.6)),       # hand height / eye-region width, before fitting
                 "rotation": float(rng.uniform(-50, 50)),
                 "flip": bool(rng.random() < 0.5),
                 "direction": [float(np.cos(angle)), float(np.sin(angle))],
@@ -284,6 +306,7 @@ def sample_replay_plan(n_frames, replay, hand_index, rng, gap=(8, 24), segments=
                 "type": "replay", "start": int(t + entry), "length": int(length), "entry": int(entry),
                 "exit": int(span - entry - length), "region": "mouth",
                 "coverage": float(max(f["c_mouth"] for f in src["frames"])),
+                "coverage_mnc": float(max(f["c_mnc"] for f in src["frames"])),
                 "hand": hand, "flip": bool(hand_index[hand][0] != src["side"]),
                 "source": f"{src['clip']}:{src['window'][0]}-{src['window'][1]}",
                 "frames": src["frames"], "seed": int(rng.integers(0, 2 ** 31)),
@@ -331,14 +354,30 @@ def _motion_blur(img, velocity, length):
 # ---------------------------------------------------------------- applying
 
 
+SCALE_GRID = (0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 1.75, 2.0, 2.3, 2.6)   # hand-size multipliers tried per episode
+ENTRY_MAX_MNC = 0.15                                         # entry / exit frames stay under the 0.2 threshold
+
+
 class Occluder:
-    """Wraps a frame source; ``occluder[i]`` is frame i with the plan's hands pasted on it."""
+    """Wraps a frame source; ``occluder[i]`` is frame i with the plan's hands pasted on it.
+
+    Calibration (mouth episodes, both kinds): the protocol's mouth/nose/chin
+    coverage is the quantity matched frame by frame -- the episode's target
+    (parametric) or the real episode's curve (replay) -- by sliding the hand
+    along its direction; the hand's size is chosen once per episode, among
+    ``SCALE_GRID`` multipliers, as the one whose lip coverage then comes
+    closest to the lip target. So an episode's duration above 0.2, its peak
+    and its severity class are the real ones, and its lip coverage is close.
+    Entry / exit frames are kept under ``ENTRY_MAX_MNC``. Eyes episodes
+    (parametric only) are calibrated on the eye region alone.
+    """
 
     def __init__(self, frames, regions, plan, bank):
         self.frames, self.plan, self.bank = frames, plan, bank
         self.regions = regions if isinstance(regions, FaceRegions) else FaceRegions.from_landmarks(regions)
         n = len(frames)
-        self.c_syn = np.zeros((n, 2), np.float32)   # [mouth, eyes]
+        self.c_syn = np.zeros((n, 2), np.float32)   # [mouth (lips), eyes]
+        self.c_syn_mnc = np.zeros(n, np.float32)     # over mouth/nose/chin, when the regions have it
         self.syn_mask = np.zeros(n, bool)            # any pasted hand (entry, core, exit)
         self.core_mask = np.zeros(n, bool)           # core frames only
         self.by_frame = {}
@@ -349,36 +388,12 @@ class Occluder:
                     self.by_frame[t] = k
                     self.syn_mask[t] = True
                     self.core_mask[t] = ep["start"] <= t < ep["start"] + ep["length"]
-        self._patch_cache, self._offset = {}, {}
+        self._patch_cache, self._placed, self._scale = {}, {}, {}
 
     def __len__(self):
         return len(self.frames)
 
-    def _patch(self, ep, face_size):
-        size = int(round(face_size))
-        key = (ep["hand"], ep["scale"], ep["rotation"], ep["flip"], size)
-        if key not in self._patch_cache:
-            patch = self.bank.get(ep["hand"])
-            if ep["flip"]:
-                patch = patch[:, ::-1].copy()
-            height = max(8, int(ep["scale"] * size))
-            width = max(8, int(patch.shape[1] * height / patch.shape[0]))
-            patch = cv2.resize(patch, (width, height), interpolation=cv2.INTER_AREA)
-            side = int(np.hypot(height, width)) + 2
-            canvas = np.zeros((side, side, 4), np.uint8)
-            y0, x0 = (side - height) // 2, (side - width) // 2
-            canvas[y0:y0 + height, x0:x0 + width] = patch
-            rot = cv2.getRotationMatrix2D((side / 2, side / 2), ep["rotation"], 1.0)
-            patch = cv2.warpAffine(canvas, rot, (side, side), flags=cv2.INTER_LINEAR)
-            # Feathered edge, in proportion to the hand's size.
-            sigma = max(0.6, 0.012 * height)
-            alpha = cv2.GaussianBlur(patch[..., 3].astype(np.float32), (0, 0), sigma) / 255.0
-            # Where the hand's mass is, relative to the canvas centre: the hand is
-            # placed by its centroid, not by the centre of its (mostly empty) box.
-            ys, xs = np.nonzero(alpha > 0.5)
-            mass = np.array([xs.mean() - side / 2, ys.mean() - side / 2]) if len(xs) else np.zeros(2)
-            self._patch_cache[key] = (patch[..., :3].copy(), alpha, height, mass)
-        return self._patch_cache[key]
+    # ---------------------------------------------------------- geometry helpers
 
     @staticmethod
     def _alpha_at(alpha, centre, shape, mass=(0.0, 0.0)):
@@ -393,30 +408,145 @@ class Occluder:
             out[fy0:fy1, fx0:fx1] = alpha[fy0 - y0:fy1 - y0, fx0 - x0:fx1 - x0]
         return out, (x0, y0)
 
-    def _calibrated_offset(self, k, t, shape):
-        """Offset (pixels) along the episode's direction that reaches its target coverage on frame t.
+    def _hull(self, t, region):
+        """The region's hull rasterised in its own bounding box: (x0, y0, mask, area), cached."""
+        key = ("hull", t, region)
+        if key not in self._patch_cache:
+            if region == "mnc":
+                if self.regions.mnc is None:
+                    raise ValueError("mouth/nose/chin regions needed: export them with export_face_regions.py")
+                hull = _hull(self.regions.mnc[t])
+            else:
+                hull = self.regions.hulls(t)[region]
+            x0, y0 = hull.min(0)
+            x1, y1 = hull.max(0)
+            mask = np.zeros((y1 - y0 + 1, x1 - x0 + 1), np.uint8)
+            cv2.fillConvexPoly(mask, hull - [x0, y0], 1)
+            self._patch_cache[key] = (int(x0), int(y0), mask > 0, int(mask.sum()))
+        return self._patch_cache[key]
 
-        Coverage falls as the hand moves out, so bisection on the offset; when even the
-        centred hand covers less than the target, it stays centred.
-        """
-        key = (k, t)
-        if key in self._offset:
-            return self._offset[key]
+    def _cov(self, alpha, mass, point, hull, shape):
+        """Coverage of a hull (from _hull) by the hand placed at ``point``, on the overlap box only."""
+        hx0, hy0, hmask, area = hull
+        if area == 0:
+            return 0.0
+        side = alpha.shape[0]
+        px0 = int(round(point[0] - side / 2 - mass[0]))
+        py0 = int(round(point[1] - side / 2 - mass[1]))
+        x0, y0 = max(px0, hx0, 0), max(py0, hy0, 0)
+        x1 = min(px0 + side, hx0 + hmask.shape[1], shape[1])
+        y1 = min(py0 + side, hy0 + hmask.shape[0], shape[0])
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        a = alpha[y0 - py0:y1 - py0, x0 - px0:x1 - px0] > 0.5
+        m = hmask[y0 - hy0:y1 - hy0, x0 - hx0:x1 - hx0]
+        return float((a & m).sum()) / area
+
+    def _bisect(self, alpha, mass, origin, u, hull, target, max_d, shape):
+        """Distance along u from origin where coverage falls to ``target`` (0 if even origin is below)."""
+        lo, hi = 0.0, max_d
+        if self._cov(alpha, mass, origin, hull, shape) < target:
+            return 0.0
+        for _ in range(12):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if self._cov(alpha, mass, origin + u * mid, hull, shape) >= target else (lo, mid)
+        return lo
+
+    def _push_under(self, alpha, mass, origin, u, d, height, shape, t, limit=ENTRY_MAX_MNC):
+        """Move out along u until mouth/nose/chin coverage is at most ``limit`` (never in)."""
+        hull = self._hull(t, "mnc")
+        if self._cov(alpha, mass, origin + u * d, hull, shape) <= limit + 0.01:
+            return d
+        return max(d, self._bisect(alpha, mass, origin, u, hull, max(limit, 0.005), d + 2.0 * height, shape))
+
+    # ---------------------------------------------------------- parametric episodes
+
+    def _patch(self, ep, face_size, mult=1.0):
+        size = int(round(face_size))
+        key = (ep["hand"], ep["scale"], ep["rotation"], ep["flip"], size, mult)
+        if key not in self._patch_cache:
+            patch = self.bank.get(ep["hand"])
+            if ep["flip"]:
+                patch = patch[:, ::-1].copy()
+            height = max(8, int(ep["scale"] * mult * size))
+            width = max(8, int(patch.shape[1] * height / patch.shape[0]))
+            patch = cv2.resize(patch, (width, height), interpolation=cv2.INTER_AREA)
+            side = int(np.hypot(height, width)) + 2
+            canvas = np.zeros((side, side, 4), np.uint8)
+            y0, x0 = (side - height) // 2, (side - width) // 2
+            canvas[y0:y0 + height, x0:x0 + width] = patch
+            rot = cv2.getRotationMatrix2D((side / 2, side / 2), ep["rotation"], 1.0)
+            patch = cv2.warpAffine(canvas, rot, (side, side), flags=cv2.INTER_LINEAR)
+            sigma = max(0.6, 0.012 * height)
+            alpha = cv2.GaussianBlur(patch[..., 3].astype(np.float32), (0, 0), sigma) / 255.0
+            # The hand is placed by its centroid, not by the centre of its (mostly empty) box.
+            ys, xs = np.nonzero(alpha > 0.5)
+            mass = np.array([xs.mean() - side / 2, ys.mean() - side / 2]) if len(xs) else np.zeros(2)
+            self._patch_cache[key] = (patch[..., :3].copy(), alpha, height, mass)
+        return self._patch_cache[key]
+
+    def _param_scale(self, k, shape):
+        """Hand size and direction for the episode: the pair whose lip coverage comes closest to the
+        lip target once the mouth/nose/chin target is met (a real hand over nose and chin can leave
+        the lips free, or cover them)."""
+        if k in self._scale:
+            return self._scale[k]
         ep = self.plan[k]
-        _, alpha, height, mass = self._patch(ep, self.regions.face_size(t))
-        hull = self.regions.hulls(t)[ep["region"]]
-        centre = self.regions.centre(t, ep["region"])
-        direction = np.array(ep["direction"])
-        cov = lambda d: coverage(self._alpha_at(alpha, centre + direction * d, shape, mass)[0], hull)
-        lo, hi = 0.0, 1.2 * height
-        if cov(lo) >= ep["coverage"]:
-            for _ in range(12):
-                mid = (lo + hi) / 2
-                lo, hi = (mid, hi) if cov(mid) >= ep["coverage"] else (lo, mid)
-        self._offset[key] = (lo, height)
-        return self._offset[key]
+        u0 = np.array(ep["direction"])
+        if ep["region"] != "mouth" or self.regions.mnc is None or "coverage_mnc" not in ep:
+            self._scale[k] = (1.0, u0)
+            return self._scale[k]
+        t = ep["start"] + ep["length"] // 2
+        origin = self.regions.centre(t, "mouth")
+        mnc_hull, lips_hull = self._hull(t, "mnc"), self._hull(t, "mouth")
+        base = np.arctan2(u0[1], u0[0])
+        best, best_err = (1.0, u0), np.inf
+        for a in np.linspace(0, 2 * np.pi, 8, endpoint=False):
+            u = np.array([np.cos(base + a), np.sin(base + a)])
+            for mult in SCALE_GRID:
+                _, alpha, height, mass = self._patch(ep, self.regions.face_size(t), mult)
+                d = self._bisect(alpha, mass, origin, u, mnc_hull, ep["coverage_mnc"], 1.5 * height, shape)
+                mnc = self._cov(alpha, mass, origin + u * d, mnc_hull, shape)
+                lips = self._cov(alpha, mass, origin + u * d, lips_hull, shape)
+                err = abs(lips - ep["coverage"]) + 2.0 * max(0.0, ep["coverage_mnc"] - mnc - 0.02)
+                if err < best_err - 1e-6:
+                    best, best_err = (mult, u), err
+        self._scale[k] = best
+        return best
 
-    def _replay_patch(self, ep, rec, face_size, eye_angle, velocity):
+    def _param_distance(self, k, t, shape):
+        """Distance from the region centre, on core frame t, that hits the episode's target."""
+        ep = self.plan[k]
+        mult, u = self._param_scale(k, shape)
+        _, alpha, height, mass = self._patch(ep, self.regions.face_size(t), mult)
+        origin = self.regions.centre(t, ep["region"])
+        if ep["region"] == "mouth" and self.regions.mnc is not None and "coverage_mnc" in ep:
+            hull, target = self._hull(t, "mnc"), ep["coverage_mnc"]
+        else:
+            hull, target = self._hull(t, ep["region"]), ep["coverage"]
+        return self._bisect(alpha, mass, origin, u, hull, target, 1.5 * height, shape), mult
+
+    def _place_param(self, k, t, shape):
+        ep = self.plan[k]
+        start, end = ep["start"], ep["start"] + ep["length"]
+        origin, u = self.regions.centre(t, ep["region"]), self._param_scale(k, shape)[1]
+        if t < start or t >= end:            # entry / exit: from the nearest core position, outwards
+            ref = start if t < start else end - 1
+            d_ref, mult = self._param_distance(k, ref, shape)
+            colour, alpha, height, mass = self._patch(ep, self.regions.face_size(t), mult)
+            steps = ep.get("entry", 1) if t < start else ep.get("exit", 1)
+            frac = ((start - t) if t < start else (t - end + 1)) / (steps + 1)
+            d = d_ref + frac * height
+            if ep["region"] == "mouth" and self.regions.mnc is not None:
+                d = self._push_under(alpha, mass, origin, u, d, height, shape, t)
+        else:
+            d, mult = self._param_distance(k, t, shape)
+            colour, alpha, height, mass = self._patch(ep, self.regions.face_size(t), mult)
+        return colour, alpha, height, mass, origin + u * d
+
+    # ---------------------------------------------------------- replayed episodes
+
+    def _replay_patch(self, ep, rec, face_size, eye_angle, velocity, mult=1.0):
         """The bank hand scaled, turned and blurred as the replayed frame says."""
         base = self.bank.get(ep["hand"])
         if ep["flip"]:
@@ -428,7 +558,7 @@ class Occluder:
             extent = max(float(np.ptp(xs)) if len(xs) else 1.0, float(np.ptp(ys)) if len(ys) else 1.0, 1.0)
             self._patch_cache[key] = (hand_direction(a), extent)
         direction, extent = self._patch_cache[key]
-        height = max(8.0, rec["height"] * face_size)
+        height = max(8.0, rec["height"] * mult * face_size)
         scale = height / extent
         patch = cv2.resize(base, (max(2, int(base.shape[1] * scale)), max(2, int(base.shape[0] * scale))),
                            interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
@@ -451,32 +581,63 @@ class Occluder:
         size = self.regions.face_size(t)
         return self.regions.centre(t, "mouth") + _rotate(np.array(rec["rel"]) * size, self.regions.eye_angle(t))
 
+    def _replay_line(self, ep, j, t):
+        """Lips centre and the unit direction towards the replayed hand position."""
+        lips = self.regions.centre(t, "mouth")
+        v = self._replay_centre(ep, j, t) - lips
+        dist = float(np.linalg.norm(v))
+        return lips, (v / dist if dist > 1e-3 else np.array([0.0, 1.0])), dist
+
+    def _replay_scale(self, k, shape):
+        if k in self._scale:
+            return self._scale[k]
+        ep = self.plan[k]
+        if self.regions.mnc is None:
+            self._scale[k] = 1.0
+            return 1.0
+        first = ep["start"] - ep["entry"]
+        j = int(np.argmax([f["c_mnc"] for f in ep["frames"]]))
+        t, rec = first + j, ep["frames"][j]
+        lips, u, dist = self._replay_line(ep, j, t)
+        mnc_hull, lips_hull = self._hull(t, "mnc"), self._hull(t, "mouth")
+        best, best_err = 1.0, np.inf
+        for mult in SCALE_GRID:
+            _, alpha, height, mass = self._replay_patch(ep, rec, self.regions.face_size(t),
+                                                        self.regions.eye_angle(t), np.zeros(2), mult)
+            d = self._bisect(alpha, mass, lips, u, mnc_hull, rec["c_mnc"], max(2 * dist, 1.5 * height), shape)
+            mnc = self._cov(alpha, mass, lips + u * d, mnc_hull, shape)
+            lip = self._cov(alpha, mass, lips + u * d, lips_hull, shape)
+            err = abs(lip - rec["c_mouth"]) + 2.0 * max(0.0, rec["c_mnc"] - mnc - 0.02)
+            if err < best_err:
+                best, best_err = mult, err
+        self._scale[k] = best
+        return best
+
     def _place_replay(self, k, t, shape):
         ep = self.plan[k]
-        first = ep["start"] - ep["entry"]
-        j = t - first
+        j = t - (ep["start"] - ep["entry"])
         rec = ep["frames"][j]
+        mult = self._replay_scale(k, shape)
         centre = self._replay_centre(ep, j, t)
         prev = self._replay_centre(ep, j - 1, t - 1) if j > 0 and t > 0 else centre
         colour, alpha, height, mass = self._replay_patch(ep, rec, self.regions.face_size(t),
-                                                         self.regions.eye_angle(t), centre - prev)
-        target = rec["c_mouth"]
+                                                         self.regions.eye_angle(t), centre - prev, mult)
+        lips, u, dist = self._replay_line(ep, j, t)
+        if self.regions.mnc is None:
+            target, hull = rec["c_mouth"], self._hull(t, "mouth")
+        else:
+            target, hull = rec["c_mnc"], self._hull(t, "mnc")
         if target > 0.2:
-            # Same coverage curve as the source: slide the hand along the line from the
-            # lips centre through its replayed position until the coverage matches.
-            lips = self.regions.centre(t, "mouth")
-            hull = self.regions.hulls(t)["mouth"]
-            u = centre - lips
-            dist = float(np.linalg.norm(u))
-            u = u / dist if dist > 1e-3 else np.array([0.0, 1.0])
-            cov = lambda d: coverage(self._alpha_at(alpha, lips + u * d, shape, mass)[0], hull)
-            lo, hi = 0.0, max(dist * 2.0, height)
-            if cov(lo) >= target:
-                for _ in range(12):
-                    mid = (lo + hi) / 2
-                    lo, hi = (mid, hi) if cov(mid) >= target else (lo, mid)
-            centre = lips + u * lo
+            # The real episode's coverage curve, frame by frame.
+            d = self._bisect(alpha, mass, lips, u, hull, target, max(2 * dist, height), shape)
+            centre = lips + u * d
+        elif self.regions.mnc is not None:
+            # Approach / retreat: where the real hand was, no more covering than it did.
+            limit = min(rec["c_mnc"], ENTRY_MAX_MNC)
+            centre = lips + u * self._push_under(alpha, mass, lips, u, dist, height, shape, t, limit)
         return colour, alpha, height, mass, centre
+
+    # ---------------------------------------------------------- compositing
 
     def __getitem__(self, t):
         frame = self.frames[t]
@@ -485,25 +646,10 @@ class Occluder:
         k = self.by_frame[t]
         ep = self.plan[k]
         shape = frame.shape[:2]
-        if ep.get("type") == "replay":
-            if (k, t) not in self._offset:
-                self._offset[(k, t)] = self._place_replay(k, t, shape)
-            colour, alpha, height, mass, centre = self._offset[(k, t)]
-            a_full, (x0, y0) = self._alpha_at(alpha, centre, shape, mass)
-            return self._composite(frame, t, colour, alpha, a_full, x0, y0, height)
-        start, end = ep["start"], ep["start"] + ep["length"]
-        colour, alpha, _, mass = self._patch(ep, self.regions.face_size(t))
-        if t < start:                        # entry: from one hand-size out to the first core position
-            offset, height = self._calibrated_offset(k, start, shape)
-            frac = (start - t) / (ep.get("entry", 1) + 1)
-            d = offset + frac * height
-        elif t >= end:                       # exit: back out from the last core position
-            offset, height = self._calibrated_offset(k, end - 1, shape)
-            frac = (t - end + 1) / (ep.get("exit", 1) + 1)
-            d = offset + frac * height
-        else:                                # core: at the target coverage on every frame
-            d, height = self._calibrated_offset(k, t, shape)
-        centre = self.regions.centre(t, ep["region"]) + np.array(ep["direction"]) * d
+        if (k, t) not in self._placed:
+            place = self._place_replay if ep.get("type") == "replay" else self._place_param
+            self._placed[(k, t)] = place(k, t, shape)
+        colour, alpha, height, mass, centre = self._placed[(k, t)]
         a_full, (x0, y0) = self._alpha_at(alpha, centre, shape, mass)
         return self._composite(frame, t, colour, alpha, a_full, x0, y0, height)
 
@@ -527,4 +673,6 @@ class Occluder:
         out = a_full[..., None] * canvas + (1.0 - a_full[..., None]) * out
         hulls = self.regions.hulls(t)
         self.c_syn[t] = [coverage(a_full, hulls["mouth"]), coverage(a_full, hulls["eyes"])]
+        if self.regions.mnc is not None:
+            self.c_syn_mnc[t] = coverage(a_full, _hull(self.regions.mnc[t]))
         return np.clip(out, 0, 255).astype(np.uint8)

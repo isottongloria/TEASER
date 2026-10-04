@@ -1,0 +1,227 @@
+<title>Temporal TEASER Pilot Dataset</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: review sheet; headline numbers first (occluded frames, severity), then how the fakes compare with real occlusion, then the material itself (hands, examples). */
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --fg: #1c2230; --muted: #5d6676; --line: #dce0e7;
+  --real: #4a6fa5; --param: #d0782a; --replay: #2f9a7a; --warn-bg: #fff4e0; --warn-line: #d49a2b; --ep: #fde9c9; --paste: #f3f0e6;
+  --sans: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12151b; --panel: #1a1e26; --fg: #e6e9ef; --muted: #9aa3b2; --line: #2c3340;
+  --real: #7ea2d8; --param: #f0a05a; --replay: #4fc7a2; --warn-bg: #33270f; --warn-line: #e0a947; --ep: #3a2d16; --paste: #262318; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1a1e26; --fg: #e6e9ef; --muted: #9aa3b2; --line: #2c3340;
+  --real: #7ea2d8; --param: #f0a05a; --replay: #4fc7a2; --warn-bg: #33270f; --warn-line: #e0a947; --ep: #3a2d16; --paste: #262318; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 15px; line-height: 1.55; }
+main { max-width: 1200px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 56px; display: grid; gap: 34px; }
+h1 { font-size: 1.8rem; margin: 0; text-wrap: balance; }
+h2 { font-size: 1.2rem; margin: 0 0 6px; text-wrap: balance; }
+h3 { font-size: 0.95rem; margin: 0 0 6px; }
+p { margin: 0; max-width: 76ch; }
+.muted { color: var(--muted); }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-width: 0; }
+.scroll { overflow-x: auto; }
+table.t { border-collapse: collapse; width: 100%; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+.t th, .t td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.t th:first-child, .t td:first-child { text-align: left; }
+.t thead th { color: var(--muted); font-size: 0.74rem; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600; }
+.t td small { color: var(--muted); }
+.t tr.group td { background: var(--bg); font-weight: 600; font-size: 0.8rem; color: var(--muted); letter-spacing: 0.03em; }
+.cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+.legend { display: flex; gap: 16px; font-size: 0.85rem; flex-wrap: wrap; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+svg text { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
+.hands { display: flex; flex-wrap: wrap; gap: 6px; }
+.hands img { height: 72px; width: auto; border-radius: 3px;
+  background: repeating-conic-gradient(var(--line) 0% 25%, var(--panel) 0% 50%) 50% / 12px 12px; }
+.strip { border-collapse: collapse; font-family: var(--mono); font-size: 0.7rem; }
+.strip td, .strip th { padding: 4px; text-align: center; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.strip th.r { text-align: left; font-family: var(--sans); font-size: 0.76rem; font-weight: 600; position: sticky; left: 0; background: var(--panel); min-width: 120px; }
+.strip td.paste { background: var(--paste); }
+.strip td.ep { background: var(--ep); }
+.strip img { display: block; height: 104px; width: auto; max-width: none; }
+.strip img.crop { height: 88px; }
+.warn { background: var(--warn-bg); border-left: 3px solid var(--warn-line); padding: 10px 14px; border-radius: 0 6px 6px 0; }
+ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
+.tag { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.pill { display: inline-block; font-family: var(--mono); font-size: 0.72rem; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); }
+</style>
+
+<main>
+  <header style="display:grid;gap:10px">
+    <h1>Temporal TEASER pilot dataset</h1>
+    <p class="muted">Clean sign-language clips with synthetic hand occlusions pasted on them, for training a temporal module on TEASER. Clips with too much real hand-over-face occlusion were dropped using the SMPL-X fits; the rest were cut into clean segments, and every synthetic hand sits inside one, so each covered frame has a true unoccluded target. Two kinds of fakes: <b>parametric</b> (calibrated episodes sampled from the real statistics) and <b>replay</b> (the dynamics of real episodes replayed with a clean hand). Nothing has been trained on this yet.</p>
+    <p class="tag" id="stamp"></p>
+  </header>
+
+  <section style="display:grid;gap:10px">
+    <h2>How many frames are occluded</h2>
+    <p class="muted">Occluded = the hands cover more than 20% of the mouth/nose/chin region (the RGB2SMPLX occlusion protocol's region and threshold, used for real and fake alike). "Training windows" is the share a 16-frame training window shows occluded when a fraction p of the windows comes from the variants.</p>
+    <div class="box scroll"><table class="t" id="occ_table"></table></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Severity per clip</h2>
+    <p class="muted">The classes of the multilingual occlusion dataset: <b>none</b> = no occluded frame; <b>severe</b> = peak coverage ≥ 0.60 and an episode ≥ 300 ms; <b>moderate</b> = the rest. A variant counts its real and fake occlusion together.</p>
+    <div class="box scroll"><table class="t" id="class_table"></table></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Severity per episode: real vs fake</h2>
+    <div class="legend"><span><span class="sw" style="background:var(--real)"></span>real (whole corpus)</span><span><span class="sw" style="background:var(--param)"></span>parametric</span><span><span class="sw" style="background:var(--replay)"></span>replay</span></div>
+    <h3>Episode duration</h3>
+    <div class="cols" id="dur_charts"></div>
+    <h3>Peak coverage of mouth, nose and chin</h3>
+    <div class="cols" id="peak_charts"></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>What is in it</h2>
+    <div class="box scroll"><table class="t" id="summary"></table></div>
+    <p class="muted" style="font-size:0.88rem">Clean frames: frames inside clean segments (24+ frames, no hand over the mouth, nose or chin, at least 2 frames from any real occlusion). Validation and test signers never appear in training; their variants use held-out hands and held-out signers' dynamics.</p>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Hand bank</h2>
+    <p class="muted">Hands cut from our own frames where the hand is away from the face: the fit's MANO hand plus a forearm stub seeds GrabCut; mostly-sleeve cut-outs are dropped and the forearm fades out. Pasted only on the same corpus. A random sample:</p>
+    <div id="hands" style="display:grid;gap:14px"></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Examples</h2>
+    <p class="muted">Light columns: a hand is pasted (approach, episode, retreat); darker: the episode's core. The last row is the face crop TEASER computes on the pasted frame (the hand is pasted before face detection). For replay, the coverage row also shows the real episode's coverage it follows.</p>
+    <div id="examples" style="display:grid;gap:16px"></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Findings and open issues</h2>
+    <div class="warn"><ul id="issues"></ul></div>
+  </section>
+</main>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  const R = JSON.parse(document.getElementById("data").textContent);
+  const NAMES = { phoenix: "PHOENIX-2014-T (DGS)", csl_daily: "CSL-Daily (CSL)", how2sign: "How2Sign (ASL)" };
+  const corpora = Object.keys(R).filter(k => !k.startsWith("_"));
+  const fmt = n => n.toLocaleString("en-US");
+  const pct = (x, d = 1) => (x == null || isNaN(x)) ? "–" : (100 * x).toFixed(d) + "%";
+  if (R._stamp) document.getElementById("stamp").textContent = R._stamp;
+
+  // 1. Occluded frames
+  let t = `<thead><tr><th>Set</th>${corpora.map(c => `<th>${NAMES[c]}</th>`).join("")}</tr></thead><tbody>`;
+  const row = (label, f, sub) => `<tr><td>${label}${sub ? `<br><small>${sub}</small>` : ""}</td>${corpora.map(c => `<td>${f(R[c].stats || {})}</td>`).join("")}</tr>`;
+  const occ = a => a ? `${pct(a.occluded_share)} <small>(${fmt(a.occluded_frames)} / ${fmt(a.frames)})</small>` : "–";
+  t += `<tr class="group"><td colspan="${corpora.length + 1}">Real video</td></tr>`;
+  t += row("Whole corpus (all candidates measured)", s => occ(s.corpus_all));
+  t += row("Training signers' candidates", s => occ(s.corpus_train_signers));
+  t += row("Selected training clips (whole clips)", s => occ(s.selected && s.selected.train), "clean segments inside them: 0% by construction");
+  ["param", "replay"].forEach(m => {
+    t += `<tr class="group"><td colspan="${corpora.length + 1}">With ${m === "param" ? "parametric" : "replayed"} fake occlusions</td></tr>`;
+    t += row("Variants, whole clips (real + fake)", s => occ(s[m] && s[m].whole));
+    t += row("Variants, inside clean segments (fake only)", s => occ(s[m] && s[m].inside_segments));
+    t += row("Training windows, p = 0.3 / 0.5 / 0.7", s => s[m] ? ["0.3", "0.5", "0.7"].map(p => pct(s[m].training_windows[p])).join(" / ") : "–",
+      "share of window frames occluded");
+  });
+  document.getElementById("occ_table").innerHTML = t + "</tbody>";
+
+  // 2. Severity classes
+  const cls = a => a ? ["none", "moderate", "severe"].map(k => `${pct(a.class_share[k], 0)}`).join(" / ") + `<br><small>${a.clips} clips</small>` : "–";
+  let c2 = `<thead><tr><th>none / moderate / severe</th>${corpora.map(c => `<th>${NAMES[c]}</th>`).join("")}</tr></thead><tbody>`;
+  c2 += row("Whole corpus", s => cls(s.corpus_all));
+  c2 += row("Selected training clips", s => cls(s.selected && s.selected.train));
+  c2 += row("Parametric variants", s => cls(s.param && s.param.whole));
+  c2 += row("Replay variants", s => cls(s.replay && s.replay.whole));
+  document.getElementById("class_table").innerHTML = c2 + "</tbody>";
+
+  // 3. Episode charts: one scale per panel, three series.
+  function bars(cats, series) {
+    const W = 340, H = 180, L = 30, Rr = 6, T = 8, B = 30;
+    const ymax = Math.max(0.05, ...series.flatMap(s => s.values));
+    const top = Math.ceil(ymax * 10) / 10;
+    const bw = (W - L - Rr) / cats.length, n = series.length;
+    const y = v => T + (1 - v / top) * (H - T - B);
+    let s = "";
+    for (let k = 0; k <= 4; k++) {
+      const v = top * k / 4;
+      s += `<line x1="${L}" x2="${W - Rr}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/>`;
+      s += `<text x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${Math.round(v * 100)}%</text>`;
+    }
+    cats.forEach((c, i) => {
+      const x = L + i * bw;
+      series.forEach((se, j) => {
+        const v = se.values[i] || 0;
+        s += `<rect x="${x + bw * (0.1 + 0.8 * j / n)}" y="${y(v)}" width="${bw * 0.8 / n - 1}" height="${Math.max(0, y(0) - y(v))}" fill="${se.color}"/>`;
+      });
+      s += `<text x="${x + bw / 2}" y="${H - B + 14}" text-anchor="middle">${c}</text>`;
+    });
+    return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img">${s}</svg>`;
+  }
+  const ser = (s, key) => [
+    { color: "var(--real)", values: s.corpus_all ? s.corpus_all[key] : [] },
+    { color: "var(--param)", values: s.param ? s.param.synthetic_episodes[key] : [] },
+    { color: "var(--replay)", values: s.replay ? s.replay.synthetic_episodes[key] : [] }];
+  const note = (s, a, b) => `<p class="tag">median: real ${a(s.corpus_all)} · parametric ${a(s.param && s.param.synthetic_episodes)} · replay ${a(s.replay && s.replay.synthetic_episodes)}<br>${b(s)}</p>`;
+  const msLabels = ["<80", "80-160", "160-300", "300-500", "500-800", "800+"];
+  const pkLabels = ["0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-0.95", "0.95+"];
+  document.getElementById("dur_charts").innerHTML = corpora.map(c => {
+    const s = R[c].stats || {};
+    return `<div class="box"><h3>${NAMES[c]}</h3>${bars(msLabels, ser(s, "episode_ms_hist"))}
+      ${note(s, a => a ? Math.round(a.episode_ms_median) + " ms" : "–", s => `episodes: real ${s.corpus_all ? fmt(s.corpus_all.episodes) : "–"}, parametric ${s.param ? fmt(s.param.synthetic_episodes.episodes) : "–"}, replay ${s.replay ? fmt(s.replay.synthetic_episodes.episodes) : "–"}`)}</div>`;
+  }).join("");
+  document.getElementById("peak_charts").innerHTML = corpora.map(c => {
+    const s = R[c].stats || {};
+    const hi = a => a ? pct(a.episode_peak_hist.slice(2).reduce((x, y) => x + y, 0), 0) : "–";
+    return `<div class="box"><h3>${NAMES[c]}</h3>${bars(pkLabels, ser(s, "episode_peak_hist"))}
+      ${note(s, a => a ? a.episode_peak_median.toFixed(2) : "–", s => `peak ≥ 0.6: real ${hi(s.corpus_all)}, parametric ${hi(s.param && s.param.synthetic_episodes)}, replay ${hi(s.replay && s.replay.synthetic_episodes)}`)}</div>`;
+  }).join("");
+
+  // 4. Summary
+  const signers = s => Object.entries(s.signers).map(([k, v]) => `${k.replace("Signer", "S").replace("h2s_", "")} ${v}`).join(", ");
+  let sm = `<thead><tr><th>Corpus</th><th>Candidates</th><th>Dropped: real occlusion</th><th>Eligible</th><th>Train</th><th>Val</th><th>Test</th><th>Variants param / replay</th><th>Hands train / held-out</th></tr></thead><tbody>`;
+  corpora.forEach(c => {
+    const r = R[c], o = r.selection.outcome, sp = r.splits;
+    const cell = s => `${sp[s].clips} clips · ${fmt(sp[s].clean_frames)} clean fr.<br><small>${signers(sp[s])}</small>`;
+    const v = m => r.synthetic[m] ? fmt(r.synthetic[m].variants) : "–";
+    sm += `<tr><td><b>${NAMES[c]}</b></td><td>${fmt(r.selection.candidates)}</td><td>${fmt(o["too much real occlusion"] || 0)} (${Math.round(100 * (o["too much real occlusion"] || 0) / r.selection.candidates)}%)</td><td>${fmt(o.eligible || 0)}</td><td>${cell("train")}</td><td>${cell("val")}</td><td>${cell("test")}</td><td>${v("param")} / ${v("replay")}</td><td>${r.hands.train.count} / ${r.hands.heldout.count}</td></tr>`;
+  });
+  document.getElementById("summary").innerHTML = sm + "</tbody>";
+
+  // 5. Hands
+  document.getElementById("hands").innerHTML = corpora.map(c => {
+    const h = R[c].hands;
+    const rw = (k, label) => `<div style="display:grid;gap:6px"><span class="tag">${label}: ${h[k].count} cut-outs from ${h[k].signers} signer group(s), median height ${Math.round(h[k].height_median)} px</span><div class="hands">${h[k].samples.map(s => `<img src="${s}" alt="hand cut-out">`).join("")}</div></div>`;
+    return `<div class="box" style="display:grid;gap:10px"><h3>${NAMES[c]}</h3>${rw("train", "training hands")}${rw("heldout", "held-out hands")}</div>`;
+  }).join("");
+
+  // 6. Examples
+  document.getElementById("examples").innerHTML = corpora.flatMap(c => R[c].examples.map(ex => {
+    const cells = fn => ex.strip.map(s => `<td class="${s.in_episode ? "ep" : (s.pasted ? "paste" : "")}">${fn(s)}</td>`).join("");
+    const label = `${ex.mode === "replay" ? "replay" : "parametric"} · ${ex.split === "train" ? "training clip, training hand" : "test clip, held-out hand"}`;
+    return `<div class="box" style="display:grid;gap:8px"><h3>${NAMES[c]} · <span class="pill">${label}</span></h3>
+      <span class="tag">${ex.clip} · ${ex.length}-frame episode${ex.source ? " · dynamics from " + ex.source : ""}</span>
+      <div class="scroll"><table class="strip"><tbody>
+      <tr><th class="r">Frame</th>${cells(s => s.t)}</tr>
+      <tr><th class="r">Clean</th>${cells(s => `<img src="${s.clean}" alt="clean frame ${s.t}">`)}</tr>
+      <tr><th class="r">Pasted hand</th>${cells(s => `<img src="${s.occluded}" alt="frame ${s.t} with pasted hand">`)}</tr>
+      <tr><th class="r">Lip coverage${ex.mode === "replay" ? " (real)" : ""}</th>${cells(s => s.coverage.toFixed(2) + (s.source_coverage != null ? `<br><small>(${s.source_coverage.toFixed(2)})</small>` : ""))}</tr>
+      <tr><th class="r">Crop TEASER sees</th>${cells(s => `<img class="crop" src="${s.crop_occ}" alt="face crop ${s.t}">`)}</tr>
+      </tbody></table></div></div>`;
+  })).join("");
+
+  // 7. Findings, partly computed from the numbers above
+  const items = [];
+  corpora.forEach(c => {
+    const s = R[c].stats; if (!s) return;
+    const real = s.corpus_all, p = s.param && s.param.synthetic_episodes, r = s.replay && s.replay.synthetic_episodes;
+    const hi = a => a ? a.episode_peak_hist.slice(2).reduce((x, y) => x + y, 0) : NaN;
+    items.push(`${NAMES[c]}: the real corpus has ${pct(real.occluded_share)} of frames occluded and ${pct(real.class_share.severe, 0)} severe clips. Fake episodes peak at ${p ? p.episode_peak_median.toFixed(2) : "–"} (parametric) and ${r ? r.episode_peak_median.toFixed(2) : "–"} (replay) mouth/nose/chin coverage against ${real.episode_peak_median.toFixed(2)} real; peaks ≥ 0.6 in ${pct(hi(p), 0)} / ${pct(hi(r), 0)} against ${pct(hi(real), 0)}.`);
+  });
+  (R._notes || []).forEach(n => items.push(n));
+  document.getElementById("issues").innerHTML = items.map(s => `<li>${s}</li>`).join("");
+})();
+</script>

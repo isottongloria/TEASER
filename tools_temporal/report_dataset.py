@@ -152,6 +152,9 @@ def corpus_report(data, corpus, rng):
                              "hand": ep["hand"], "length": ep["length"], "source": ep.get("source"), "strip": strip})
             break
     out["examples"] = examples
+    stats_path = data / "report" / f"stats_{corpus}.json"
+    if stats_path.is_file():
+        out["stats"] = json.loads(stats_path.read_text())
     return out
 
 

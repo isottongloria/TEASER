@@ -91,6 +91,10 @@ def summarise(paths, tau=0.2, fps=25.0):
         "durations": {"histogram": {str(k): v for k, v in histogram.items()}, **_percentiles(durations)},
         "coverage": {"peak_mnc": _percentiles(peaks_mnc), "peak_mouth": _percentiles(peaks_mouth),
                      "peak_mouth_values": [round(v, 4) for v in peaks_mouth],
+                     # per episode (peak mouth/nose/chin IoA, peak lip IoA, frames): what a
+                     # synthetic episode is sampled from, so its severity matches a real one
+                     "episodes_mnc_lips_frames": [[round(a, 4), round(b, 4), int(d)]
+                                                  for a, b, d in zip(peaks_mnc, peaks_mouth, durations)],
                      "fraction_reaching_eyes": float(np.mean(eyes_hit)) if eyes_hit else 0.0,
                      "fraction_total_mouth": float(np.mean(np.array(peaks_mouth) > 0.9)) if peaks_mouth else 0.0,
                      "eyes_only_episodes": eyes_only,

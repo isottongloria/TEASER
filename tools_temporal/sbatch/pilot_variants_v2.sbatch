@@ -11,7 +11,7 @@
 #SBATCH --chdir=/leonardo_work/IscrC_SLPSCALE/TEASER_temporal
 #SBATCH --output=/leonardo_work/IscrC_SLPSCALE/TEASER_temporal/logs/%x.%j.out
 #
-# Synthetic variants v2 (TEMPORAL_README.md 5.4) for all pilot clips, MODE=param
+# Synthetic variants (v3; TEMPORAL_README.md 5.4) for all pilot clips, MODE=param
 # (calibrated parametric episodes, -> variants/) or MODE=replay (real occlusion
 # dynamics, -> variants_replay/): 3 per training clip with training hands and
 # training-signer dynamics, 2 per val/test clip with held-out ones. 8 processes.
@@ -24,7 +24,8 @@ OUT=variants; [ $MODE = replay ] && OUT=variants_replay
 variants() {
   C=$1; clip=$2; k=$3; split=$4
   extra=""
-  [ $MODE = replay ] && extra="--replay $D/replay_bank/$C/$split/$C.jsonl --hand_index $D/hand_bank/$C/index.tsv"
+  bank=$C; [ $C = how2sign ] && bank=how2sign_pooled   # How2Sign: pooled real dynamics
+  [ $MODE = replay ] && extra="--replay $D/replay_bank/$bank/$split/$C.jsonl --hand_index $D/hand_bank/$C/index.tsv"
   echo "$clip" > /tmp/v_$$_$clip.txt
   PYTHONPATH=$PWD $TPY tools_temporal/make_synthetic_variants.py --clips_root $D/$C/clips --cache $D/$C/cache \
     --out $D/$C/$OUT --hands $D/hand_bank/$C/$split --hand_list $D/$C/lists/hands_$split.txt \
