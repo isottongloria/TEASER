@@ -114,7 +114,7 @@ def evaluate(model, clips, variants, flame, region_names, cfg, device, with_base
             if kind == "real":
                 groups = M.frame_groups(real_occ, valid, cfg.loss.near_k + 1)
             else:
-                groups = M.frame_groups(clip.syn_mask, valid, cfg.loss.near_k + 1, exclude=real_occ)
+                groups = M.frame_groups(clip.syn_occ, valid, cfg.loss.near_k + 1, exclude=real_occ)
             ref_v = M.canonical_mm(flame, ref, device)
             episodes = clip.episodes if kind == "synthetic" else None
             results[kind].append(M.clip_metrics(M.canonical_mm(flame, pred, device), ref_v, groups,

@@ -153,6 +153,31 @@ class FlameTest(unittest.TestCase):
         self.assertTrue(torch.allclose(batched.reshape(4, -1, 3), ours, atol=1e-6))
 
 
+class OcclusionAugTest(unittest.TestCase):
+    def test_calibrated_coverage_and_masks(self):
+        """The pasted hand reaches the planned coverage on the core frames; c_syn is consistent."""
+        from src.temporal import occlusion_aug as oa
+
+        n, h, w = 20, 240, 240
+        frames = [np.full((h, w, 3), 150, np.uint8) for _ in range(n)]
+        t = np.arange(n)[:, None]
+        mouth = np.stack([np.array([[100, 150], [140, 150], [140, 170], [100, 170]], float)] * n)
+        eyes = np.stack([np.array([[80, 90], [160, 90], [160, 110], [80, 110]], float)] * n)
+        regions = oa.FaceRegions(mouth, eyes)
+        plan = [{"start": 6, "length": 5, "entry": 2, "exit": 2, "region": "mouth", "coverage": target,
+                 "hand": "procedural_3", "scale": 1.3, "rotation": 10.0, "flip": False,
+                 "direction": [0.6, 0.8], "drift": 0.0, "seed": 0} for target in (0.5,)]
+        occ = oa.Occluder(frames, regions, plan, oa.HandBank("procedural"))
+        for k in range(n):
+            occ[k]
+        core = occ.c_syn[6:11, 0]
+        self.assertTrue(np.all(np.abs(core - 0.5) < 0.08), core)
+        self.assertEqual(occ.syn_mask.nonzero()[0].tolist(), list(range(4, 13)))
+        self.assertEqual(occ.core_mask.nonzero()[0].tolist(), list(range(6, 11)))
+        self.assertTrue(np.all(occ.c_syn[:4] == 0) and np.all(occ.c_syn[13:] == 0))
+        self.assertLess(occ.c_syn[4, 0], core.min())  # entry: the hand is still coming in
+
+
 class BaselineTest(unittest.TestCase):
     def test_savgol_keeps_a_parabola(self):
         t = np.arange(30, dtype=np.float32)[:, None]

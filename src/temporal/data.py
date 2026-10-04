@@ -83,6 +83,7 @@ class Clip:
             self.c_mnc = np.zeros(n, np.float32)
         self.c_syn = np.zeros((n, 2), np.float32)
         self.syn_mask = np.zeros(n, bool)
+        self.syn_occ = np.zeros(n, bool)
         self.episodes = []
 
     def __len__(self):
@@ -118,6 +119,8 @@ class VariantClip(Clip):
             valid = cache["valid"].astype(bool)
             self.c_syn = cache["c_syn"].astype(np.float32)
             self.syn_mask = cache["syn_mask"].astype(bool)
+            # Occluded like a real frame: coverage of the episode's region above 0.2.
+            self.syn_occ = self.syn_mask & (self.c_syn.max(1) > 0.2)
             self.episodes = json.loads(str(cache["plan"]))
         if len(self.feats) != len(clean):
             raise ValueError(f"{variant_path}: {len(self.feats)} frames, clean clip has {len(clean)}")
@@ -178,9 +181,11 @@ class WindowDataset(Dataset):
         if self.occ_aug_p > 0 and rng.random() < self.occ_aug_p:
             clip = self.variants[rng.integers(len(self.variants))]
             ep = clip.episodes[rng.integers(len(clip.episodes))]
-            room = self.window - ep["length"]
+            first = ep["start"] - ep.get("entry", 0)
+            span = ep.get("entry", 0) + ep["length"] + ep.get("exit", 0)
+            room = self.window - span
             lead = int(rng.integers(1, room)) if room >= 2 else 0
-            start = int(np.clip(ep["start"] - lead, 0, max(0, len(clip) - self.window)))
+            start = int(np.clip(first - lead, 0, max(0, len(clip) - self.window)))
         else:
             clip = self.clips[rng.choice(len(self.clips), p=self.p)]
             start = _clean_start(clip, self.window, rng)

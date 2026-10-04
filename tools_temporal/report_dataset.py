@@ -122,8 +122,12 @@ def corpus_report(data, corpus, rng):
             frames = vc.Frames(vc.list_frames(root / "clips" / clip / "frames"), 1 << 30)
             hands = oa.HandBank(str(data / "hand_bank" / ("train" if split == "train" else "heldout")),
                                 [l[0] for l in lines(lists / f"hands_{'train' if split == 'train' else 'heldout'}.txt")])
-            occ = oa.Occluder(frames, landmarks, plan, hands)
-            lo, hi = max(0, ep["start"] - 2), min(len(frames), ep["start"] + ep["length"] + 2)
+            regions_path = root / "regions" / f"{clip}.regions.npz"
+            regions = oa.FaceRegions.from_fit(regions_path) if regions_path.is_file() \
+                else oa.FaceRegions.from_landmarks(landmarks)
+            occ = oa.Occluder(frames, regions, plan, hands)
+            lo = max(0, ep["start"] - ep.get("entry", 0) - 1)
+            hi = min(len(frames), ep["start"] + ep["length"] + ep.get("exit", 0) + 1)
             crop = lambda img, T: warp(img, SimilarityTransform(matrix=T.astype(float)).inverse,
                                        output_shape=(224, 224), preserve_range=True).astype(np.uint8)
             strip = []
@@ -131,7 +135,7 @@ def corpus_report(data, corpus, rng):
                 clean_img, occ_img = frames[t], occ[t]
                 h = 200
                 fit = lambda im: cv2.resize(im, (int(im.shape[1] * h / im.shape[0]), h), interpolation=cv2.INTER_AREA)
-                strip.append({"t": t, "in_episode": bool(ep["start"] <= t < ep["start"] + ep["length"]),
+                strip.append({"t": t, "in_episode": bool(occ.core_mask[t]), "pasted": bool(occ.syn_mask[t]),
                               "coverage": round(float(occ.c_syn[t, 0]), 2),
                               "clean": b64(fit(clean_img)), "occluded": b64(fit(occ_img)),
                               "crop_occ": b64(cv2.resize(crop(occ_img, tform_occ[t]), (128, 128))),

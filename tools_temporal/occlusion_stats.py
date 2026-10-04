@@ -10,8 +10,10 @@ Writes, per corpus run:
 - ``durations``: histogram (frames -> count), mean, median, percentiles;
 - ``episodes_per_second`` and ``occluded_fraction`` of all frames;
 - ``coverage``: per episode, the peak IoA over mouth/nose/chin and over the
-  lips, and the fraction of episodes that also reach the eyes -- partial vs
-  total occlusion;
+  lips, the fraction of mouth episodes that also reach the eyes (a hand over
+  the mouth often touches the eye region too), and ``eyes_only_rate``: eye
+  episodes with no mouth occlusion at all, over all episodes -- the rate at
+  which a synthetic hand should go to the eyes instead of the mouth;
 - ``gap_frames``: distance between consecutive episodes in a clip.
 
 The synthetic-occlusion sampler (src/temporal/occlusion_aug.py) draws from
@@ -63,10 +65,14 @@ def clip_episodes(occ, tau):
 
 def summarise(paths, tau=0.2, fps=25.0):
     durations, peaks_mnc, peaks_mouth, eyes_hit, gaps = [], [], [], [], []
-    total_frames = occluded_frames = 0
+    total_frames = occluded_frames = eyes_only = 0
     for path in paths:
         with np.load(path) as occ:
             episodes, n = clip_episodes(occ, tau)
+            mouth_flags = np.nan_to_num(occ["c_mnc"], nan=0.0) > tau
+            for start, end in segments(np.nan_to_num(occ["c_eyes"], nan=0.0) > tau):
+                if not mouth_flags[start:end + 1].any():
+                    eyes_only += 1
         total_frames += n
         for k, ep in enumerate(episodes):
             durations.append(ep["frames"])
@@ -86,7 +92,9 @@ def summarise(paths, tau=0.2, fps=25.0):
         "coverage": {"peak_mnc": _percentiles(peaks_mnc), "peak_mouth": _percentiles(peaks_mouth),
                      "peak_mouth_values": [round(v, 4) for v in peaks_mouth],
                      "fraction_reaching_eyes": float(np.mean(eyes_hit)) if eyes_hit else 0.0,
-                     "fraction_total_mouth": float(np.mean(np.array(peaks_mouth) > 0.9)) if peaks_mouth else 0.0},
+                     "fraction_total_mouth": float(np.mean(np.array(peaks_mouth) > 0.9)) if peaks_mouth else 0.0,
+                     "eyes_only_episodes": eyes_only,
+                     "eyes_only_rate": eyes_only / max(len(durations) + eyes_only, 1)},
         "gap_frames": _percentiles(gaps),
     }
 

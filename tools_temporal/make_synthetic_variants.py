@@ -13,7 +13,8 @@ there are TEASER *on the occluded frames*, i.e. the T0 baseline under
 occlusion), plus:
 
 ``c_syn`` (T, 2)   synthetic coverage [mouth, eyes] from the pasted alpha
-``syn_mask`` (T,)  frames with a pasted hand
+``syn_mask`` (T,)  frames with a pasted hand (entry, core and exit)
+``core_mask`` (T,) core frames (the hand at its target coverage)
 ``plan``           the episodes, JSON (inside the clip's clean segments with ``--segments``)
 ``clean_cache``    the clean cache's file name: the training target (TEASER on
                    the unoccluded frames) and the clean landmarks come from it.
@@ -44,6 +45,8 @@ def main():
     parser.add_argument("--hand_list", type=Path, help="names of the hand PNGs to use (train or test identities)")
     parser.add_argument("--stats", type=Path, help="occlusion_stats.py JSON (default: geometric, mean 4.3 frames)")
     parser.add_argument("--variants", type=int, default=3)
+    parser.add_argument("--regions", type=Path, help="export_face_regions.py output: place and measure on the "
+                                                     "fit's FLAME regions (default: MediaPipe landmarks)")
     parser.add_argument("--segments", type=Path, help="segments.json of select_clean_clips.py: paste only "
                                                       "inside each clip's clean segments")
     parser.add_argument("--names", type=Path, help="clip names (default: every clean cache)")
@@ -58,6 +61,7 @@ def main():
     hand_list = args.hand_list.resolve() if args.hand_list else None
     stats_path = args.stats.resolve() if args.stats else None
     names_path = args.names.resolve() if args.names else None
+    regions_dir = args.regions.resolve() if args.regions else None
     segments = json.loads(args.segments.read_text()) if args.segments else {}
     checkpoint = args.checkpoint.resolve()
     os.chdir(REPO_ROOT)
@@ -89,16 +93,18 @@ def main():
             started = time.time()
             rng = np.random.default_rng([args.seed, k, zlib.crc32(name.encode())])
             plan = oa.sample_plan(len(frames), stats, bank.names, rng, segments=segments.get(name))
-            occluder = oa.Occluder(frames, landmarks, plan, bank)
+            regions = (oa.FaceRegions.from_fit(regions_dir / f"{name}.regions.npz") if regions_dir
+                       else oa.FaceRegions.from_landmarks(landmarks))
+            occluder = oa.Occluder(frames, regions, plan, bank)
             arrays = extract_clip(clips_root / name, encoder, device, args.temporal_feats,
                                   frames=occluder, progress=False)
-            arrays.update(c_syn=occluder.c_syn, syn_mask=occluder.syn_mask,
+            arrays.update(c_syn=occluder.c_syn, syn_mask=occluder.syn_mask, core_mask=occluder.core_mask,
                           plan=np.array(json.dumps(plan)), clean_cache=np.array(f"{name}.npz"),
                           fps=np.float32(fps))
             tmp = target.with_name(f".{target.name}.tmp.npz")
             np.savez(tmp, **arrays)
             os.replace(tmp, target)
-            covered = occluder.c_syn[occluder.syn_mask]
+            covered = occluder.c_syn[occluder.core_mask]
             print(f"[variants] {name} v{k}: {len(plan)} episodes, {int(occluder.syn_mask.sum())}/{len(frames)} "
                   f"frames, mouth coverage median {np.median(covered[:, 0]) if len(covered) else 0:.2f}, "
                   f"{time.time() - started:.0f} s")

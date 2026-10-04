@@ -15,14 +15,15 @@
 # CORPORA (default "phoenix csl_daily"):
 #  1. hand bank: train signers -> bank/train, val+test signers -> bank/heldout;
 #  2. occlusion statistics of the training signers' candidates (sizing the fakes);
-#  3. synthetic variants inside the clean segments: 3 per training clip with
+#  3. synthetic variants inside the clean segments, placed and measured on the
+#     fits' FLAME regions (export_face_regions.py): 3 per training clip with
 #     training hands, 2 per val/test clip with held-out hands. 8 processes.
 set -uo pipefail
 D=$PWD/data/temporal
 RPY=$HOME/miniconda3/envs/rgb2smplx/bin/python
 TPY=/leonardo_work/IscrC_SLPSCALE/TEASER/.conda_envs/teaser/bin/python
 export PYTHONNOUSERSITE=1 HF_HUB_OFFLINE=1 TQDM_DISABLE=1 OMP_NUM_THREADS=4
-CORPORA=${CORPORA:-"phoenix csl_daily"}
+CORPORA=${CORPORA:-"phoenix csl_daily how2sign"}
 declare -A MINPX=([phoenix]=18 [csl_daily]=60 [how2sign]=40)
 declare -A FPS=([phoenix]=25 [csl_daily]=30 [how2sign]=30)
 
@@ -48,7 +49,8 @@ variants() {
   echo "$clip" > /tmp/v_$$_$clip.txt
   PYTHONPATH=$PWD $TPY tools_temporal/make_synthetic_variants.py --clips_root $D/$C/clips --cache $D/$C/cache \
     --out $D/$C/variants --hands $D/hand_bank/$hands --hand_list $D/$C/lists/hands_$hands.txt \
-    --stats $D/$C/lists/occlusion_stats_train.json --segments $D/$C/lists/segments.json --variants $k \
+    --stats $D/$C/lists/occlusion_stats_train.json --segments $D/$C/lists/segments.json --regions $D/$C/regions \
+    --variants $k \
     --names /tmp/v_$$_$clip.txt 2>/dev/null | grep "^\[variants\]" || echo "[variants FAILED] $C $clip"
   rm -f /tmp/v_$$_$clip.txt
 }

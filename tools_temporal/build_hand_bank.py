@@ -21,7 +21,8 @@ fit's camera and rasterised triangle by triangle (finger gaps stay open). It
 seeds GrabCut on the image: eroded silhouette = sure hand, dilated band =
 probable, outside = background. A cut-out is kept when GrabCut and the
 silhouette agree (IoU >= ``--min_iou``) and at least ``--min_skin`` of it has a
-skin colour (not mostly sleeve); its alpha is feathered by 1 px.
+skin colour (not mostly sleeve); its alpha is feathered by 1 px and faded
+out along the forearm stub, so the arm does not end in a straight cut.
 At most ``--per_clip`` cut-outs per clip and hand side, the sharpest ones.
 
 Writes ``<out>/<split>/<corpus>__<signer>__<clip>__f<frame>__<side>.png`` and
@@ -41,7 +42,11 @@ FOREARM_CM = 0.08
 
 
 def hand_vertex_sets(geometry):
-    """{'left'/'right': (vertex ids, face rows)} = MANO hand + forearm stub."""
+    """{'left'/'right': (vertex ids, face rows, per-face fade)} = MANO hand + forearm stub.
+
+    The fade is 1 on the hand and falls linearly to 0 along the stub (template
+    distance from the wrist, 0..8 cm), so the forearm fades out instead of
+    ending in a straight cut."""
     import torch
 
     model = geometry._model()
@@ -57,8 +62,23 @@ def hand_vertex_sets(geometry):
         ids = np.union1d(np.asarray(groups[f"{side}_hand"]), stub)
         inside = np.zeros(len(template), bool)
         inside[ids] = True
-        out[side] = (ids, faces[inside[faces].all(1)])
+        face_rows = faces[inside[faces].all(1)]
+        hand = np.zeros(len(template), bool)
+        hand[np.asarray(groups[f"{side}_hand"])] = True
+        depth = np.where(hand, 0.0, np.linalg.norm(template - joints[wrist], axis=1) / FOREARM_CM)
+        fade = np.clip(1.0 - depth[face_rows].mean(1), 0.0, 1.0)
+        out[side] = (ids, face_rows, fade)
     return out
+
+
+def fade_map(points_xy, faces, fade, shape, blur):
+    """Per-pixel fade (1 on the hand, towards 0 along the forearm stub), smoothed."""
+    out = np.zeros(shape, np.float32)
+    tris = np.round(points_xy[faces]).astype(np.int32)
+    order = np.argsort(-fade)  # draw faded triangles last so the stub's end wins
+    for k in order:
+        cv2.fillConvexPoly(out, tris[k], float(fade[k]))
+    return cv2.GaussianBlur(out, (0, 0), blur) if blur > 0 else out
 
 
 def silhouette(points_xy, faces, shape):
@@ -99,7 +119,7 @@ def hull_mask(points_xy, shape):
     return mask
 
 
-def cut_out(frame, sil, margin):
+def cut_out(frame, sil, margin, fade=None):
     """GrabCut seeded by the silhouette, inside the silhouette's box + margin. -> (rgba, iou) or None."""
     ys, xs = np.nonzero(sil)
     h, w = sil.shape
@@ -128,6 +148,8 @@ def cut_out(frame, sil, margin):
     union = np.logical_or(fg, s).sum()
     iou = float(np.logical_and(fg, s).sum() / union) if union else 0.0
     alpha = cv2.GaussianBlur(fg.astype(np.float32) * 255, (3, 3), 0)
+    if fade is not None:
+        alpha *= fade[y0:y1, x0:x1]
     return np.dstack([crop, alpha.astype(np.uint8)]), iou
 
 
@@ -182,7 +204,7 @@ def main():
                 for col, side in enumerate(("left", "right")):
                     if not valid[t, col]:
                         continue
-                    ids, faces = sets[side]
+                    ids, faces, _ = sets[side]
                     pts = projected[t]
                     hand = pts[ids]
                     height = np.ptp(hand, axis=0).max()
@@ -211,8 +233,10 @@ def main():
                         break
                     frame = cv2.imread(str(frames[t]))
                     pts = projected[t]
-                    sil = silhouette(pts, sets[side][1], frame.shape[:2])
-                    result = cut_out(frame, sil, margin=max(4, int(0.15 * height)))
+                    ids, faces, fades = sets[side]
+                    sil = silhouette(pts, faces, frame.shape[:2])
+                    fade = fade_map(pts, faces, fades, frame.shape[:2], blur=max(1.0, 0.03 * height))
+                    result = cut_out(frame, sil, margin=max(4, int(0.15 * height)), fade=fade)
                     if result is None or result[1] < args.min_iou:
                         continue
                     rgba, iou = result

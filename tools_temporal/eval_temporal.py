@@ -128,7 +128,7 @@ def main():
                 if kind == "real":
                     groups = M.frame_groups(real_occ, clip.valid, args.near_k)
                 else:
-                    groups = M.frame_groups(clip.syn_mask, clip.valid, args.near_k, exclude=real_occ)
+                    groups = M.frame_groups(clip.syn_occ, clip.valid, args.near_k, exclude=real_occ)
                 results[kind].append(M.clip_metrics(M.canonical_mm(flame, pred, device),
                                                     M.canonical_mm(flame, clip.teacher, device), groups,
                                                     region_index, clip.episodes if kind == "synthetic" else None))
