@@ -187,7 +187,9 @@ def main():
                              dc.get("segments"))
     val_clips = load_clips(read_list(dc.val_list), dc.cache_dir, dc.occ_dir, dc.feature_set, dc.teacher_smoothing)
     train_variants = load_variants(train_clips, dc.variant_dir, dc.feature_set) if dc.variant_dir else []
-    val_variants = load_variants(val_clips, dc.variant_dir, dc.feature_set) if dc.variant_dir else []
+    # Validation variants can differ from the training ones, so every run is compared on the same set.
+    val_variant_dir = dc.get("val_variant_dir") or dc.variant_dir
+    val_variants = load_variants(val_clips, val_variant_dir, dc.feature_set) if val_variant_dir else []
     # The same metrics on part of the training set, to see overfitting (train improving, val not).
     n_eval = int(cfg.train.get("eval_train_clips", 0))
     step_eval = max(1, len(train_clips) // max(n_eval, 1))

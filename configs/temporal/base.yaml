@@ -11,6 +11,7 @@ data:
   cache_dir: ???          # clean feature caches <clip>.npz
   occ_dir: null           # real occlusion <clip>.occ.npz
   variant_dir: null       # synthetic-occlusion variants <clip>.v<k>.npz
+  val_variant_dir: null   # variants for validation (default: variant_dir); fixed across compared runs
   train_list: ???
   val_list: ???
   feature_set: expr       # expr | expr+pose
