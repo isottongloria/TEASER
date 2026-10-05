@@ -20,7 +20,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--notes", type=Path)
     parser.add_argument("--run", type=Path, help="a training run directory (summary.json, eval_val.json)")
-    parser.add_argument("--results", type=Path, help="render_results.py output")
+    parser.add_argument("--results", type=Path, action="append", default=[],
+                        help="render_results.py output (repeatable: one block per file, in order)")
     parser.add_argument("--eval", action="append", default=[],
                         help="TITLE=path/to/eval_temporal.json[:DESCRIPTION], shown as comparison tables in order")
     args = parser.parse_args()
@@ -46,8 +47,7 @@ def main():
         title, rest = spec.split("=", 1)
         path, _, desc = rest.partition(":")
         report["_evals"].append({"title": title, "desc": desc, "data": json.loads(Path(path).read_text())})
-    if args.results and args.results.is_file():
-        report["_results"] = json.loads(args.results.read_text())
+    report["_results"] = [json.loads(p.read_text()) for p in args.results if p.is_file()]
     data = json.dumps(report).replace("</", "<\\/")
     args.out.write_text(TEMPLATE.read_text().replace("__DATA__", data))
     print(f"[page] {args.out} ({args.out.stat().st_size // 1024} KB)")

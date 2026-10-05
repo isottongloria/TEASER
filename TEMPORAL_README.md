@@ -637,3 +637,14 @@ at TEASER. Architecture: transformer best; window 32 slightly better (1.86);
 pose features / trained head no gain; GRU 2.12, window 8 2.18, causal 2.34,
 TCN 2.41; loss on parameters needs rebalancing (not comparable as run). All
 three corpora together beat any single corpus on every corpus.
+
+### Final result, 2026-10-05 (`runs/eval_final_*_agg.json`)
+
+Final configuration: transformer, 32-frame window, mixed fakes, w_accel 1,
+SG9 on the output; checkpoints `runs/P4_final_s{0,1,2}/best.pt`. Test set
+(held-out signers, hands, dynamics), mean of 3 seeds: mouth error under the
+hand 1.65 ± 0.02 mm (current pipeline 4.60, SG9 7.80, TEASER 9.63), next to
+it 0.81 (1.81), episodes > 10 frames 1.82 (5.30); clean frames as SG9 (drift
+0.24 vs 0.23 mm, jerk 0.14 vs 0.16). 100 PHOENIX clips with real occlusion
+(stability only): jerk 0.27 occluded / 0.30 near / 0.28 clean vs 0.31 / 0.61
+/ 0.37 for the current pipeline.

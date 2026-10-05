@@ -75,7 +75,7 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
   </section>
 
   <section style="display:grid;gap:10px" id="results_section" hidden>
-    <h2>Model outputs on training clips</h2>
+    <h2>Model outputs</h2>
     <p class="muted">The face each method reconstructs, rendered from the front with the clip's mean identity and the head pose removed, so only expression, jaw and eyelids differ. <b>Synthetic</b>: a pasted hand on a clean clip, with the target (TEASER on the frame without the hand). <b>Real</b>: a real hand over the mouth in a training clip; those frames are outside the clean segments, were never a training target, and have no ground truth. The curve is the mouth opening (vertical extent of the lips) over a longer stretch; shaded: hand over the face.</p>
     <div id="results" style="display:grid;gap:16px"></div>
   </section>
@@ -317,8 +317,11 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
     }).join("");
   }
 
-  const RES = R._results;
-  if (RES && RES.examples && RES.examples.length) {
+  const RESL = Array.isArray(R._results) ? R._results : (R._results ? [R._results] : []);
+  if (RESL.length) {
+    document.getElementById("results_section").hidden = false;
+    const blocks = [];
+    RESL.forEach(RES => {
     document.getElementById("results_section").hidden = false;
     const COLORS = { "TEASER (T0)": "var(--muted)", "SG9 + interp (T2)": "var(--param)", "Temporal (T7)": "var(--replay)", "Target": "var(--real)" };
     function curve(ex) {
@@ -334,7 +337,9 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
       return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:640px;height:auto" role="img">${s}</svg>
         <div class="legend">${Object.keys(ex.curves).map(k => `<span><span class="sw" style="background:${COLORS[k] || "var(--fg)"}"></span>${k}</span>`).join("")}<span class="tag">mouth opening, mm · frame</span></div>`;
     }
-    document.getElementById("results").innerHTML = RES.examples.map(ex => {
+    const ckpt = (RES.checkpoint || "").split("/").slice(-2, -1)[0] || "";
+    blocks.push(`<h3 style="margin-top:6px">${RES.split === "train" ? "Training clips" : "Test clips (held-out signers, hands and dynamics)"} · <span class="tag">${ckpt}</span></h3>`);
+    blocks.push(RES.examples.map(ex => {
       const inCore = t => t >= ex.core[0] && t < ex.core[1];
       const cells = fn => ex.frames.map((t, i) => `<td class="${inCore(t) ? "ep" : ""}">${fn(t, i)}</td>`).join("");
       const rows = Object.entries(ex.renders).map(([k, imgs]) => `<tr><th class="r">${k}</th>${cells((t, i) => `<img class="crop" src="${imgs[i]}" alt="${k} frame ${t}">`)}</tr>`).join("");
@@ -344,7 +349,9 @@ ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 90ch; }
         <tr><th class="r">Frame</th>${cells(t => t)}</tr>
         <tr><th class="r">Crop TEASER sees</th>${cells((t, i) => `<img class="crop" src="${ex.crops[i]}" alt="crop ${t}">`)}</tr>
         ${rows}</tbody></table></div>${curve(ex)}</div>`;
-    }).join("");
+    }).join(""));
+    });
+    document.getElementById("results").innerHTML = blocks.join("");
   }
 
   // 7. Findings, partly computed from the numbers above
