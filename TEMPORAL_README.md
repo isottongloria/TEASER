@@ -626,3 +626,14 @@ real (whole corpus) vs parametric vs replay:
 Occluded frames: real corpus 10.5 % (PHOENIX), 7.6 % (CSL-Daily), 1.3 %
 (How2Sign); selected training clips 2.0 / 2.0 / 0.4 % (outside their clean
 segments); training windows at occ_aug_p 0.5: 9-11 % (0.3: ~6 %, 0.7: 13-15 %).
+
+### Ablations, 2026-10-05 (validation; `runs/eval_phase*_val.json`, review page)
+
+Mouth error under the hand / next to it (mm), all followed by SG9 unless noted:
+current pipeline (SG9 + Hermite) 5.26 / 2.13; SmoothNet 4.60 ± 0.02; T7 replay
+1.95 ± 0.01; **T7 mixed fakes 1.92 ± 0.03 / 1.02** (3 seeds; clean-frame drift
+0.29 mm and jerk 0.18, as SG9 alone). Without fakes (T4-T6) the adapter stays
+at TEASER. Architecture: transformer best; window 32 slightly better (1.86);
+pose features / trained head no gain; GRU 2.12, window 8 2.18, causal 2.34,
+TCN 2.41; loss on parameters needs rebalancing (not comparable as run). All
+three corpora together beat any single corpus on every corpus.
