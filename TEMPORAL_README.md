@@ -461,9 +461,27 @@ Otherwise it measures how well the model memorised the training hands:
   per duration bucket (1-2, 3-5, 6-10, >10 frames) so a win on the common
   short case cannot hide a loss on the long one.
 
-The test set is generated once with a fixed seed and stored
-(`tools_temporal/build_occlusion_testset.py`), so every method is scored on the
-same occlusions.
+The variants are generated once with fixed seeds (`make_synthetic_variants.py`,
+seeded by clip, variant index and `--seed`) and stored, so every method is scored
+on the same occlusions. The variant caches keep TEASER's features and each
+episode's full plan, not the pixels; for methods that need the frames (another
+face model, e.g. Pixel3DMM) the variants are also written out as videos:
+
+    sbatch tools_temporal/sbatch/render_variants.sbatch            # CPU, ~16 min on 32 cores
+    sbatch tools_temporal/sbatch/verify_rendered_variants.sbatch   # 10% re-extracted with TEASER
+
+`data/temporal/occluded_videos/<split>/<corpus>/<clip>.<param|replay><k>/`:
+`frames/` (the frames with a hand as lossless PNG, the others links to the clean
+frames), `occlusion.npz` (c_syn, syn_mask, core_mask, plan, source cache) and
+`video.json`; `index.tsv` lists all 2374 (train 1722, val 252, test 400; 108 881
+PNG, 61 GB -- CSL-Daily and How2Sign frames are 0.7-0.8 MB each). The Occluder
+has no randomness, so they are the frames training and evaluation saw: the
+coverage measured while re-pasting equals the saved `c_syn` on all 2374, and
+TEASER re-run on a 10% sample (238 variants, 31 887 frames, every split /
+corpus / kind) gives bit-identical features, parameters and landmarks (as does
+re-running clean clips: the extraction is deterministic). Training's
+variants_mix/ v0-v2 are the `param` ones, v3-v5 the `replay` ones; the test
+tables use `replay` (and `param` for the second table).
 
 ---
 
